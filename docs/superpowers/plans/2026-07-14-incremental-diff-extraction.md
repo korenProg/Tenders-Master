@@ -1,6 +1,6 @@
 # Incremental Line-Diff Extraction Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Cut Gemini token costs by sending only *changed* page lines to the AI instead of full pages, per the approved spec at `docs/superpowers/specs/2026-07-14-incremental-diff-extraction-design.md`.
 
@@ -46,12 +46,12 @@
   - `stableKey(line: string): string | null` — the per-line identity used for diffing; `null` means "noise line, not diffable".
   - `buildEntries(cleanedText: string): Array<{ line: string, key: string | null }>` — one entry per line of the cleaned text, `line` preserved verbatim (digits intact).
 
-- [ ] **Step 1: Check Node version supports the built-in test runner**
+- [x] **Step 1: Check Node version supports the built-in test runner**
 
 Run: `node --version`
 Expected: `v18.x` or higher.
 
-- [ ] **Step 2: Add the test script to package.json**
+- [x] **Step 2: Add the test script to package.json**
 
 In `package.json`, replace the `scripts` block:
 
@@ -61,7 +61,7 @@ In `package.json`, replace the `scripts` block:
   },
 ```
 
-- [ ] **Step 3: Write the failing tests**
+- [x] **Step 3: Write the failing tests**
 
 Create `test/text.test.js`:
 
@@ -102,12 +102,12 @@ test('buildEntries keeps original lines verbatim and tags noise lines with null 
 });
 ```
 
-- [ ] **Step 4: Run tests to verify they fail**
+- [x] **Step 4: Run tests to verify they fail**
 
 Run: `npm test`
 Expected: FAIL with `Cannot find module '../lib/text'`.
 
-- [ ] **Step 5: Write the implementation**
+- [x] **Step 5: Write the implementation**
 
 Create `lib/text.js`. `superCleanText` is copied **verbatim** from `main.js:30-57`; `stableKey` reproduces the exact per-line transformation from `main.js:161-168`:
 
@@ -166,12 +166,12 @@ function buildEntries(cleanedText) {
 module.exports = { superCleanText, stableKey, buildEntries };
 ```
 
-- [ ] **Step 6: Run tests to verify they pass**
+- [x] **Step 6: Run tests to verify they pass**
 
 Run: `npm test`
 Expected: all 4 tests PASS.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add lib/text.js test/text.test.js package.json
@@ -198,7 +198,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
   - `makeSiteEntry(stableKeys: string[], tenders: Tender[], pendingDelivery: boolean): SiteEntry` where `SiteEntry = { version: 2, stableKeys, tenders, pendingDelivery, updatedAt: string }`.
   - `CACHE_FILE: string` — `'./tenders_cache.json'`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `test/cache.test.js`:
 
@@ -245,12 +245,12 @@ test('cache round-trips through disk and returns {} for missing file', () => {
 });
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `npm test`
 Expected: `test/cache.test.js` FAILS with `Cannot find module '../lib/cache'` (text tests still pass).
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Create `lib/cache.js`:
 
@@ -293,12 +293,12 @@ function makeSiteEntry(stableKeys, tenders, pendingDelivery) {
 module.exports = { loadCache, saveCache, getSiteEntry, makeSiteEntry, CACHE_FILE };
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `npm test`
 Expected: all tests PASS (text + cache).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add lib/cache.js test/cache.test.js
@@ -322,7 +322,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
   - `isDiffTooLarge(addedKeys: string[], removedKeys: string[], cachedCount: number, newCount: number): boolean` — the spec's >50% safety valve; also `true` when both counts are 0.
   - `buildChunks(entries: Array<{line, key}>, addedKeys: string[], window?: number): string[]` — merged ±`window` (default 3) line excerpts around added lines, original text with digits intact.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `test/diff.test.js`:
 
@@ -381,12 +381,12 @@ test('buildChunks clamps windows at page boundaries and returns [] with no addit
 });
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `npm test`
 Expected: `test/diff.test.js` FAILS with `Cannot find module '../lib/diff'`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Create `lib/diff.js`:
 
@@ -430,12 +430,12 @@ function buildChunks(entries, addedKeys, window = 3) {
 module.exports = { diff, isDiffTooLarge, buildChunks };
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `npm test`
 Expected: all tests PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add lib/diff.js test/diff.test.js
@@ -460,7 +460,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
   - `tenderStillOnPage(tender: Tender, pageText: string, normalizedPageText: string): boolean` — the spec's zero-token removal check (number regex, then 30-char title fallback).
   - `mergeTenders(cachedTenders: Tender[], newTendersRaw: Tender[], pageText: string, publisher: string, sourceUrl: string): Tender[]` — drops vanished cached tenders, upserts AI-extracted tenders (update-in-place on number match against *cached* tenders; dedup `-2` suffixes for collisions between *new* tenders, exactly like the old full-page path). **Calling it with `cachedTenders = []` reproduces today's full-page finalization** — `main.js` uses this for both paths.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `test/merge.test.js`:
 
@@ -552,12 +552,12 @@ test('mergeTenders keeps tenders with no number via title matching only', () => 
 });
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `npm test`
 Expected: `test/merge.test.js` FAILS with `Cannot find module '../lib/merge'`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Create `lib/merge.js`:
 
@@ -645,12 +645,12 @@ function mergeTenders(cachedTenders, newTendersRaw, pageText, publisher, sourceU
 module.exports = { normalizeForTitleMatch, tenderStillOnPage, mergeTenders };
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `npm test`
 Expected: all tests PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add lib/merge.js test/merge.test.js
@@ -670,7 +670,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 - Consumes: everything produced by Tasks 1-4 (`superCleanText`, `buildEntries`, `loadCache`, `saveCache`, `getSiteEntry`, `makeSiteEntry`, `diff`, `isDiffTooLarge`, `buildChunks`, `mergeTenders`).
 - Produces: the runnable pipeline. `processWithAI(rawText, { excerpt })` gains an excerpt flag that adds one sentence to the prompt; everything else about the prompt is unchanged.
 
-- [ ] **Step 1: Replace `main.js` with the new orchestration**
+- [x] **Step 1: Replace `main.js` with the new orchestration**
 
 The diff decision logic per site is:
 
@@ -899,12 +899,12 @@ run();
 
 Note: a webhook network error or non-2xx makes axios throw inside `deliverToWebhook`; the outer `catch` logs it. Because the cache was saved with `pendingDelivery: true` *before* the POST, the next run resends for free — that's intended, not a gap.
 
-- [ ] **Step 2: Verify syntax and that all unit tests still pass**
+- [x] **Step 2: Verify syntax and that all unit tests still pass**
 
 Run: `node --check main.js && npm test`
 Expected: no syntax error; all tests PASS.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add main.js
@@ -926,24 +926,24 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 
 **Cost note:** Step 1 is the one-time migration run — every site takes the full-extraction path because the existing cache is legacy format. This is expected and was accepted in the spec ("first scrape is expensive, that's OK"). Steps 2-4 must be nearly free. Each run POSTs to the live Lovable webhook, which is normal operation for this app.
 
-- [ ] **Step 1: Migration run (full cost, one time)**
+- [x] **Step 1: Migration run (full cost, one time)**
 
 Run: `node main.js`
 Expected: every site logs `📄 Full extraction (first run / legacy cache)`. After the run, open `tenders_cache.json` and confirm entries are objects with `"version": 2`, a `stableKeys` array, a `tenders` array, and `"pendingDelivery": false`. Some flaky sites may fail with scraper/timeout errors — that's pre-existing behavior; they retry next run.
 
-- [ ] **Step 2: No-change run (must be ~0 tokens)**
+- [x] **Step 2: No-change run (must be ~0 tokens)**
 
 Run: `node main.js` (immediately after Step 1)
 Expected: every site that succeeded in Step 1 logs `⏭️ Green Light: Website content is IDENTICAL to last run. Skipping AI.` The final stats line shows `AI calls: 0/14` (or only the sites that failed Step 1).
 
-- [ ] **Step 3: Simulated new tender (incremental path)**
+- [x] **Step 3: Simulated new tender (incremental path)**
 
 Open `tenders_cache.json`, pick a site with a healthy v2 entry, and delete ONE string from its `stableKeys` array (this makes that line look "new" on the next run). Save the file.
 
 Run: `node main.js`
 Expected for that site: `✂️ Incremental: 1 new / 0 removed lines → sending only <small> of <big> chars to AI...` where the excerpt size is a small fraction of the page size, followed by a merged-list webhook delivery. All other sites log Green Light. Verify in the stats line that input tokens are a tiny fraction of Step 1's.
 
-- [ ] **Step 4: Simulated removed tender (zero tokens)**
+- [x] **Step 4: Simulated removed tender (zero tokens)**
 
 Open `tenders_cache.json`, pick the same site, and:
 1. Add a fake key to `stableKeys`: `"מכרז בדיקה מזויף שאיננו קיים באתר"`
@@ -952,7 +952,7 @@ Open `tenders_cache.json`, pick the same site, and:
 Run: `node main.js`
 Expected for that site: `🗑️ Removals only (1 lines gone) — no AI call needed. 0 tokens.` and the webhook payload no longer contains the fake tender (the merged count returns to the real count). `AI calls: 0` for this site.
 
-- [ ] **Step 5: Commit the verified cache state note**
+- [x] **Step 5: Commit the verified cache state note**
 
 No code changed in this task. If everything passed, mark the plan checkboxes and commit the plan progress:
 
