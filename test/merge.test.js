@@ -1,0 +1,85 @@
+const { test } = require('node:test');
+const assert = require('node:assert');
+const { mergeTenders, tenderStillOnPage, normalizeForTitleMatch } = require('../lib/merge');
+
+const PUB = 'עיריית בדיקה';
+const URL = 'https://example.muni.il/bids';
+
+function makeTender(over = {}) {
+  return {
+    title: 'מכרז לאספקת ריהוט משרדי לעירייה',
+    tender_number: '12/2026',
+    deadline_date: '01/09/2026',
+    publisher: PUB,
+    source_url: URL,
+    ...over
+  };
+}
+
+function onPage(t, page) {
+  return tenderStillOnPage(t, page, normalizeForTitleMatch(page));
+}
+
+test('tenderStillOnPage matches the number in several formats', () => {
+  const t = makeTender();
+  assert.ok(onPage(t, 'רשימת מכרזים: 12/2026 הגשה עד סוף החודש'));
+  assert.ok(onPage(t, 'רשימת מכרזים: 12.26 הגשה עד סוף החודש'));
+  assert.ok(onPage(t, 'רשימת מכרזים: 12 / 2026 הגשה עד סוף החודש'));
+});
+
+test('tenderStillOnPage does not match 12/2026 inside 412/2026 or 12/20261', () => {
+  const t = makeTender();
+  assert.ok(!onPage(t, 'מכרז 412/2026 בנושא אחר שאין לו קשר'));
+  assert.ok(!onPage(t, 'מסמך 12/20261 מספר שגוי ולא קשור'));
+});
+
+test('tenderStillOnPage strips the dedup suffix before matching', () => {
+  const t = makeTender({ tender_number: '12/2026-2' });
+  assert.ok(onPage(t, 'מכרז מספר 12/2026 עדיין פתוח להגשה'));
+});
+
+test('tenderStillOnPage falls back to title match when number is missing', () => {
+  const t = makeTender({ tender_number: 'אין' });
+  assert.ok(onPage(t, 'מכרז לאספקת ריהוט משרדי לעירייה המקומית'));
+  assert.ok(!onPage(t, 'מכרז אחר לגמרי בנושא שונה בהחלט'));
+});
+
+test('mergeTenders drops vanished cached tenders and appends new ones with publisher', () => {
+  const gone = makeTender({ title: 'מכרז ישן שכבר הוסר מהאתר לגמרי', tender_number: '5/2025' });
+  const stays = makeTender();
+  const pageText = 'מכרז 12/2026 לאספקת ריהוט משרדי\nמכרז חדש 99/2026 לשירותי גינון בפארקים';
+  const newRaw = [{ title: 'מכרז חדש לשירותי גינון בפארקים', tender_number: '99/2026', deadline_date: '10/10/2026' }];
+  const merged = mergeTenders([gone, stays], newRaw, pageText, PUB, URL);
+  assert.deepStrictEqual(merged.map(t => t.tender_number).sort(), ['12/2026', '99/2026']);
+  const added = merged.find(t => t.tender_number === '99/2026');
+  assert.strictEqual(added.publisher, PUB);
+  assert.strictEqual(added.source_url, URL);
+});
+
+test('mergeTenders updates an existing cached tender in place instead of duplicating', () => {
+  const cached = makeTender({ deadline_date: '01/09/2026' });
+  const pageText = 'מכרז 12/2026 לאספקת ריהוט משרדי מוארך עד סוף השנה';
+  const newRaw = [{ title: 'מכרז לאספקת ריהוט משרדי לעירייה', tender_number: '12/2026', deadline_date: '30/10/2026' }];
+  const merged = mergeTenders([cached], newRaw, pageText, PUB, URL);
+  assert.strictEqual(merged.length, 1);
+  assert.strictEqual(merged[0].deadline_date, '30/10/2026');
+  assert.strictEqual(merged[0].tender_number, '12/2026');
+});
+
+test('mergeTenders with empty cache reproduces the old full-page finalization', () => {
+  const pageText = 'שני מכרזים שונים שמספרם זהה מופיעים כאן';
+  const newRaw = [
+    { title: 'מכרז ראשון 7/26 לשיפוץ מבנה ציבור', tender_number: 'אין', deadline_date: 'אין' },
+    { title: 'מכרז שני 7/26 לאחזקת גני ילדים', tender_number: 'אין', deadline_date: 'אין' }
+  ];
+  const merged = mergeTenders([], newRaw, pageText, PUB, URL);
+  // number extracted from title, 2-digit year expanded, collision suffixed — like main.js:193-216
+  assert.deepStrictEqual(merged.map(t => t.tender_number), ['7/2026', '7/2026-2']);
+});
+
+test('mergeTenders keeps tenders with no number via title matching only', () => {
+  const cached = makeTender({ tender_number: 'אין' });
+  const pageText = 'מכרז לאספקת ריהוט משרדי לעירייה עדיין באוויר';
+  const merged = mergeTenders([cached], [], pageText, PUB, URL);
+  assert.strictEqual(merged.length, 1);
+});
