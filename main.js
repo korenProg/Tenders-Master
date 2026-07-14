@@ -1,14 +1,16 @@
 const puppeteer = require('puppeteer');
 const axios = require('axios');
-const fs = require('fs');
-const crypto = require('crypto');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 require('dotenv').config();
+
+const { superCleanText, buildEntries } = require('./lib/text');
+const { loadCache, saveCache, getSiteEntry, makeSiteEntry } = require('./lib/cache');
+const { diff, isDiffTooLarge, buildChunks } = require('./lib/diff');
+const { mergeTenders } = require('./lib/merge');
 
 const WEBHOOK_URL = process.env.WEBHOOK_URL;
 const WEBHOOK_KEY = process.env.ELIYAHO_WEBHOOK_KEY;
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-const CACHE_FILE = './tenders_cache.json';
 
 const MUNICIPALITIES = [
   { publisher: "עיריית חיפה", url: "https://www2.haifa.muni.il/Michrazim/Default.aspx", script: "./scrapers/haifa.js" },
@@ -27,52 +29,18 @@ const MUNICIPALITIES = [
   { publisher: "עיריית באר שבע", url: "https://www.beer-sheva.muni.il/City/FreeInfo/Rehesh/Pages/Bids.aspx", script: "./scrapers/beer-sheva.js" }
 ];
 
-function superCleanText(text) {
-  if (!text) return "";
-  const junkWords = [
-    "נגישות", "הצהרת נגישות", "מפת האתר", "כל הזכויות שמורות", "צור קשר", 
-    "פייסבוק", "טוויטר", "יוטיוב", "אינסטגרם", "דילוג לתוכן", "מוקדי שירות",
-    "דלג לתוכן המרכזי", "שירות לאזרח", "מדיניות פרטיות", "תנאי שימוש",
-    "sharepoint", "session", "token", "powered by", "webpack",
-    "חדשות", "מבזק", "אירועים", "לוח אירועים" // מסנן אוניברסלי לזבל דינמי
-  ];
-  
-  return text
-    .split('\n')
-    .map(line => line.trim())
-    .filter(line => {
-      if (line.length === 0) return false;
-      if (line.includes("{") || line.includes("}") || line.includes("]=") || line.includes("typeof") || line.includes("!important") || line.includes("-->")) return false;
-      
-      const englishAndSpecs = line.match(/[a-zA-Z0-9_\-\/]/g) || [];
-      if (line.length > 40 && (englishAndSpecs.length / line.length) > 0.6) return false;
-      
-      if (line.length < 100) {
-        return !junkWords.some(word => line.toLowerCase().includes(word.toLowerCase()));
-      }
-      return true;
-    })
-    .join('\n')
-    .replace(/[ \t]+/g, ' ');
-}
-
-function loadCache() {
-  if (fs.existsSync(CACHE_FILE)) {
-    try { return JSON.parse(fs.readFileSync(CACHE_FILE, 'utf8')); } catch (e) { return {}; }
-  }
-  return {};
-}
-function saveCache(cache) {
-  fs.writeFileSync(CACHE_FILE, JSON.stringify(cache, null, 2), 'utf8');
-}
-
 const RUN_STATS = { aiCalls: 0, inputTokens: 0, outputTokens: 0 };
 
-async function processWithAI(rawText) {
+async function processWithAI(rawText, { excerpt = false } = {}) {
   const modelName = "gemini-2.5-flash";
-  
+
+  const excerptNote = excerpt
+    ? `\n    NOTE: The text below contains only EXCERPTS from the webpage, separated by "---" lines. It is NOT the full page. Extract every tender visible in these excerpts.\n`
+    : "";
+
   const prompt = `
     You are an expert data extraction tool. Analyze the following raw webpage text from a municipality website.
+    ${excerptNote}
     Extract all ACTIVE/OPEN tenders. For each tender, accurately extract:
     1. title: The full descriptive title of the tender in Hebrew. Clean any weird trailing chars.
     2. tender_number: The formal tender identifier/number. STRICLY STANDARDIZE the format to "NUMBER/YEAR" (e.g., if you see "47.26" or "47/26", format it strictly as "47/2026"). If no number exists, write "אין".
@@ -87,9 +55,9 @@ async function processWithAI(rawText) {
 
   try {
     console.log(`🤖 Attempting extraction with model: ${modelName}...`);
-    const model = genAI.getGenerativeModel({ 
+    const model = genAI.getGenerativeModel({
       model: modelName,
-      generationConfig: { temperature: 0.0 } 
+      generationConfig: { temperature: 0.0 }
     });
     const result = await model.generateContent(prompt);
     const usage = result.response.usageMetadata;
@@ -108,20 +76,27 @@ async function processWithAI(rawText) {
   }
 }
 
+async function deliverToWebhook(tenders) {
+  const response = await axios.post(WEBHOOK_URL, { tenders }, {
+    headers: { 'Content-Type': 'application/json', 'x-webhook-key': WEBHOOK_KEY }
+  });
+  return response.status === 200;
+}
+
 async function run() {
-  console.log("🚀 Starting Ultra-Optimized Scraper Run (Universal Content-Only Hashing)...");
+  console.log("🚀 Starting Incremental Scraper Run (Line-Diff Extraction)...");
   const startTime = Date.now();
   const cache = loadCache();
 
   for (let i = 0; i < MUNICIPALITIES.length; i++) {
     const muni = MUNICIPALITIES[i];
     console.log(`\n=== [${i + 1}/${MUNICIPALITIES.length}] Processing: ${muni.publisher} ===`);
-    
+
     let browser;
     try {
-      browser = await puppeteer.launch({ 
-        headless: "new", 
-        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-blink-features=AutomationControlled'] 
+      browser = await puppeteer.launch({
+        headless: "new",
+        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-blink-features=AutomationControlled']
       });
 
       const page = await browser.newPage();
@@ -130,7 +105,7 @@ async function run() {
       await page.setUserAgent('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
 
       await page.goto(muni.url, { waitUntil: 'domcontentloaded', timeout: 60000 });
-      
+
       const targetModule = require(muni.script);
       const scrapeResult = await targetModule.scrape(page);
 
@@ -141,100 +116,81 @@ async function run() {
       }
 
       const pages = Array.isArray(scrapeResult) ? scrapeResult : [scrapeResult];
-      
+
       let fullCityRawText = "";
       for (let p = 0; p < pages.length; p++) {
         fullCityRawText += `\n--- PAGE ${p + 1} ---\n` + pages[p];
       }
 
       const cleanedCityText = superCleanText(fullCityRawText);
+      const entries = buildEntries(cleanedCityText);
+      const siteEntry = getSiteEntry(cache, muni.url);
+      const cachedKeys = siteEntry ? siteEntry.stableKeys : [];
+      const { addedKeys, removedKeys, newKeys } = diff(cachedKeys, entries);
 
-      // 🔥 השריון האוניברסלי החדש: התעלמות מוחלטת מבאנרים, תפריטים ושעונים
-      const noiseWords = new Set([
-        "יום", "ראשון", "שני", "שלישי", "רביעי", "חמישי", "שישי", "שבת",
-        "ינואר", "פברואר", "מרץ", "אפריל", "מאי", "יוני", "יולי", "אוגוסט", "ספטמבר", "אוקטובר", "נובמבר", "דצמבר",
-        "שעה", "שעות", "דקה", "דקות", "שניה", "שניות", "היום", "מחר", "אתמול",
-        "תאריך", "עודכן", "אחרון", "פורסם", "צפיות", "קוראים", "תגובות",
-        "עמוד", "דף", "מתוך", "הבא", "הקודם", "הבאים", "קודמים", "לפני", "הצג", "עוד"
-      ]);
-
-      let stableLines = cleanedCityText
-        .split('\n')
-        .map(line => {
-          let cleanLine = line.replace(/\d+/g, '').replace(/[^\u0590-\u05FFa-zA-Z\s]/g, ' ').trim();
-          let words = cleanLine.split(/\s+/).filter(w => w.length > 1 && !noiseWords.has(w));
-          return words.join(' ').trim();
-        })
-        .filter(line => line.split(/\s+/).length >= 4); // חובה 4 מילים עבריות! משמיד תפריטים ובאנרים קצרים
-
-      // מחיקת כפילויות במקרה של חלונות שמצלמים את אותו באנר שוב ושוב
-      stableLines = Array.from(new Set(stableLines)).sort(); 
-
-      let textForHashing = muni.url + stableLines.join('');
-      const currentHash = crypto.createHash('md5').update(textForHashing).digest('hex');
-      
-      if (cache[muni.url] === currentHash) {
-        console.log(`⏭️ Green Light: Website content is IDENTICAL to last run. Skipping AI.`);
+      // Case 1: nothing changed since last run
+      if (siteEntry && addedKeys.length === 0 && removedKeys.length === 0) {
+        if (siteEntry.pendingDelivery && siteEntry.tenders.length > 0) {
+          console.log(`📡 Content unchanged but last delivery failed — resending ${siteEntry.tenders.length} cached tenders (0 tokens)...`);
+          if (await deliverToWebhook(siteEntry.tenders)) {
+            cache[muni.url] = makeSiteEntry(siteEntry.stableKeys, siteEntry.tenders, false);
+            saveCache(cache);
+            console.log(`✅ Webhook accepted pending delivery. Cache updated.`);
+          }
+        } else {
+          console.log(`⏭️ Green Light: Website content is IDENTICAL to last run. Skipping AI.`);
+        }
         await browser.close();
         continue;
       }
 
-      console.log(`📄 Sent optimized text (${cleanedCityText.length} chars) to AI...`);
-      // ה-AI מקבל את הטקסט המלא (עם המספרים) כדי שלא נאבד מידע על המכרזים
-      const allCityTenders = await processWithAI(cleanedCityText);
+      // Case 2: choose full vs incremental extraction
+      const useFullPath = !siteEntry || isDiffTooLarge(addedKeys, removedKeys, cachedKeys.length, newKeys.length);
 
-      if (allCityTenders === null) {
+      let newTenders = [];
+      if (useFullPath) {
+        const reason = !siteEntry ? "first run / legacy cache" : "diff too large — safety fallback";
+        console.log(`📄 Full extraction (${reason}): sending ${cleanedCityText.length} chars to AI...`);
+        newTenders = await processWithAI(cleanedCityText);
+      } else if (addedKeys.length > 0) {
+        const chunks = buildChunks(entries, addedKeys);
+        const excerptText = chunks.join('\n---\n');
+        console.log(`✂️ Incremental: ${addedKeys.length} new / ${removedKeys.length} removed lines → sending only ${excerptText.length} of ${cleanedCityText.length} chars to AI...`);
+        newTenders = await processWithAI(excerptText, { excerpt: true });
+      } else {
+        console.log(`🗑️ Removals only (${removedKeys.length} lines gone) — no AI call needed. 0 tokens.`);
+      }
+
+      if (newTenders === null) {
         console.log(`⚠️ AI extraction failed. Cache NOT updated — will retry next run.`);
         await browser.close();
         continue;
       }
-      console.log(`✨ AI Extracted ${allCityTenders.length} clean tenders.`);
 
-      if (allCityTenders.length > 0) {
-        const usedNumbers = new Set();
-        const finalizedTenders = allCityTenders.map(t => {
-          let fixedNumber = t.tender_number;
-          const match = t.title.match(/(\d+)\s*[\/\.]\s*(\d+)/);
-          if (match) {
-            let year = match[2];
-            if (year.length === 2) year = "20" + year;
-            fixedNumber = `${match[1]}/${year}`;
-          }
+      const merged = mergeTenders(useFullPath ? [] : siteEntry.tenders, newTenders, cleanedCityText, muni.publisher, muni.url);
+      console.log(`✨ Merged list: ${merged.length} tenders (${newTenders.length} newly extracted).`);
 
-          if (fixedNumber !== "אין") {
-            let finalNumber = fixedNumber;
-            let counter = 2;
-            while (usedNumbers.has(finalNumber)) {
-              finalNumber = `${fixedNumber}-${counter}`;
-              counter++;
-            }
-            fixedNumber = finalNumber;
-            usedNumbers.add(fixedNumber);
-          }
+      if (merged.length > 0) {
+        // Save BEFORE delivery: a webhook failure must never cost a second AI call.
+        cache[muni.url] = makeSiteEntry(newKeys, merged, true);
+        saveCache(cache);
 
-          return { ...t, tender_number: fixedNumber, publisher: muni.publisher, source_url: muni.url };
-        });
-
-        console.log(`📡 Streaming ${finalizedTenders.length} structured tenders to Lovable Webhook...`);
-        const response = await axios.post(WEBHOOK_URL, { tenders: finalizedTenders }, {
-          headers: { 'Content-Type': 'application/json', 'x-webhook-key': WEBHOOK_KEY }
-        });
-        
-        if (response.status === 200) {
-          console.log(`✅ Webhook Accepted! Status: 200. Updating Cache.`);
-          cache[muni.url] = currentHash;
+        console.log(`📡 Streaming ${merged.length} structured tenders to Lovable Webhook...`);
+        if (await deliverToWebhook(merged)) {
+          cache[muni.url] = makeSiteEntry(newKeys, merged, false);
           saveCache(cache);
+          console.log(`✅ Webhook Accepted! Status: 200. Cache updated.`);
         } else {
-          console.log(`⚠️ Webhook returned unexpected status ${response.status}. Cache not updated.`);
+          console.log(`⚠️ Webhook returned unexpected status. Extraction saved — will resend next run without AI.`);
         }
       } else if (cleanedCityText.length > 1500) {
         console.log(`✅ Page verified healthy with 0 active tenders. Updating Cache.`);
-        cache[muni.url] = currentHash;
+        cache[muni.url] = makeSiteEntry(newKeys, [], false);
         saveCache(cache);
       } else {
         console.log(`⚠️ Warning: Page content seems too low or failed. Skipping cache to allow retry.`);
       }
-      
+
       await browser.close();
       if (i < MUNICIPALITIES.length - 1) {
         await new Promise(r => setTimeout(r, 4000));
