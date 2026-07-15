@@ -123,21 +123,38 @@ Matching an extracted tender to an expected one uses the same identity rule as t
 ### `main.js` changes
 
 1. **Structured output.** `processWithAI` passes a `responseSchema` so Gemini returns conforming JSON. This retires the ` ```json ` fence-strip regex and the bare `JSON.parse`, eliminating a whole failure class. `null`-on-failure semantics are unchanged.
-2. **Validation in the delivery path.** After `mergeTenders`, run each tender through `validateTender` against the cleaned page text. Drop/degrade per policy. Log the issue histogram.
+2. **Validation as a delivery-time filter.** Immediately before each `deliverToWebhook` call, run the list through `validateTenders` against the cleaned page text. Drop/degrade per policy. Log the issue histogram.
 3. **Health assessment.** Call `assessSite` before delivery; log level and signals into the existing per-site output and the `RUN_STATS` summary.
 
-Validation runs on the **merged** list so cached tenders are re-verified against the current page each run, not just newly extracted ones.
+### The cache stores RAW merged tenders, not validated ones
+
+**This is load-bearing and non-obvious.** Validation must NOT change what is written to the cache.
+
+`upsertKey` in `lib/merge.js` keys a tender as `num:<number>` when it has one, and falls back to `title:<normalized title>` otherwise. If validation degraded a hallucinated `tender_number` to `"אין"` **and that were cached**, the tender's upsert key would silently flip from `num:` to `title:`. On a later run the same tender would be re-extracted *with* its number, produce a `num:` key, fail to match the cached `title:` key, and be appended as a **duplicate**.
+
+Therefore:
+
+- **Cache** = raw `mergeTenders` output. Stable upsert identity, unchanged schema.
+- **Webhook** = validated output. The product never sees unverified data.
+
+Validation is pure and deterministic, so re-deriving the validated list on every run is free and yields identical results. Both delivery points must validate — the normal path and the `pendingDelivery` resend path (`cleanedCityText` is already in scope at both).
+
+A consequence worth naming: the cache may hold a tender whose number is hallucinated. That is harmless — `tenderStillOnPage` already falls back to title matching, so the record survives correctly and is simply degraded again at delivery.
 
 ### Data flow
 
 ```
 scrape → superCleanText → diff → (AI or skip) → mergeTenders
-  → validateTender per tender      [0 tokens]
+  → save cache (RAW merged, unchanged schema, pendingDelivery:true)
+  → validateTenders                [0 tokens, delivery-time filter]
       ├─ drop hallucinated records
       └─ degrade unverifiable fields to "אין"
   → assessSite → level + signals   [0 tokens]
-  → save cache (unchanged schema) → POST to webhook (unchanged contract)
+  → POST validated list to webhook (unchanged contract)
+  → on 200 → save cache (pendingDelivery:false)
 ```
+
+The existing save-before-deliver invariant is preserved exactly: the cache is still written before the POST, so a webhook failure still costs zero AI tokens.
 
 ## Error Handling
 
