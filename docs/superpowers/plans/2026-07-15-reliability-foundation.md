@@ -617,6 +617,8 @@ No schema fields added."
 
 ### Task 5: `lib/ai.js` — extract the Gemini call and add `responseSchema`
 
+> ⚠️ **Tasks 5 and 6 MUST land together.** This task deletes `processWithAI` while `main.js` still calls it in two places; Task 6 rewires those call sites. Between the two commits `main.js` is **runtime-broken**. `node --check` only parses and will NOT catch this — it passes on a file with undefined function calls. Do not stop, hand off, or leave the branch deployable between Task 5 and Task 6.
+
 `scripts/accuracy.js` must call the exact same extraction path production uses, so it cannot live in `main.js`. Move it, and add structured output while moving it.
 
 **Files:**
