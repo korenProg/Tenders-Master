@@ -76,7 +76,7 @@ Config carries only the genuinely functional knobs; everything else defaults:
   networkIdle: false,   // settle via waitForNetworkIdle instead of a fixed sleep — tel-aviv
   maxPages: 5,          // constant across all 14; overridable
   settleMs: 4000,       // initial settle when not networkIdle
-  waitMs: 5000,         // per-page wait after scroll (>= the max any scraper uses)
+  waitMs: 6000,         // per-page wait after scroll (>= the max any scraper uses — ashkelon's 6000)
   nextTokens: ['הבא', 'next', '›', '»', 'לעמוד הבא']  // union across all 14
 }
 ```
@@ -99,7 +99,7 @@ const pages = muni.script
   : await paginate(makePuppeteerDriver(page, muni.pagination || {}), muni.pagination || {});
 ```
 
-A migrated site has `pagination` (or nothing) and no `script`; a site kept custom retains `script` and its file. The two are mutually exclusive per row.
+A migrated site has `pagination` (or nothing) and no `script`; a site kept custom retains `script` and its file. **`script` always wins the dispatch** — during migration a row may carry both (`pagination` sits dormant so `scrape-diff` can exercise the generic path before the site is converted); removing `script` is the act of migrating.
 
 ### Migration tool: `scripts/scrape-diff.js` (free)
 
