@@ -1,6 +1,6 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
-const { mergeTenders, tenderStillOnPage, normalizeForTitleMatch } = require('../lib/merge');
+const { mergeTenders, tenderStillOnPage, normalizeForTitleMatch, numberOnPage, titleOnPage, baseNumber } = require('../lib/merge');
 
 const PUB = 'עיריית בדיקה';
 const URL = 'https://example.muni.il/bids';
@@ -82,4 +82,27 @@ test('mergeTenders keeps tenders with no number via title matching only', () => 
   const pageText = 'מכרז לאספקת ריהוט משרדי לעירייה עדיין באוויר';
   const merged = mergeTenders([cached], [], pageText, PUB, URL);
   assert.strictEqual(merged.length, 1);
+});
+
+test('numberOnPage matches N/YYYY, N/YY and N.YYYY forms', () => {
+  assert.strictEqual(numberOnPage('47/2026', 'מכרז 47/2026 לניקיון'), true);
+  assert.strictEqual(numberOnPage('47/2026', 'מכרז 47/26 לניקיון'), true);
+  assert.strictEqual(numberOnPage('47/2026', 'מכרז 47.2026 לניקיון'), true);
+  assert.strictEqual(numberOnPage('47/2026', 'מכרז 47 / 26 לניקיון'), true);
+  assert.strictEqual(numberOnPage('47/2026', 'מכרז 48/2026 לניקיון'), false);
+});
+
+test('numberOnPage strips the dedup suffix and rejects "אין"', () => {
+  assert.strictEqual(numberOnPage('47/2026-2', 'מכרז 47/2026 לניקיון'), true);
+  assert.strictEqual(numberOnPage('אין', 'מכרז 47/2026 לניקיון'), false);
+  assert.strictEqual(baseNumber('47/2026-3'), '47/2026');
+  assert.strictEqual(baseNumber(undefined), 'אין');
+});
+
+test('titleOnPage compares normalized text and rejects absent titles', () => {
+  const page = 'מכרז פומבי לאספקת שירותי ניקיון 47/2026';
+  const norm = normalizeForTitleMatch(page);
+  assert.strictEqual(titleOnPage('מכרז פומבי לאספקת שירותי ניקיון', norm), true);
+  assert.strictEqual(titleOnPage('אספקת מחשבים ניידים לבתי הספר היסודיים', norm), false);
+  assert.strictEqual(titleOnPage('', norm), false);
 });
