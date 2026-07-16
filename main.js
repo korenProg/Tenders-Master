@@ -79,8 +79,9 @@ async function run() {
 
     let browser;
     try {
+      // HEADFUL=1 opens a visible browser window — for demos and debugging.
       browser = await puppeteer.launch({
-        headless: "new",
+        headless: process.env.HEADFUL ? false : "new",
         args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-blink-features=AutomationControlled']
       });
 
