@@ -34,15 +34,14 @@ test('zero tenders from a thin page is not a signal', () => {
   assert.deepStrictEqual(r.signals, []);
 });
 
-test('low yield warns — calibrated on the real Tel Aviv vs Holon numbers', () => {
-  // תל אביב measured 2026-07-15: 46,634 chars -> 7 tenders = 6662 chars/tender
+test('a bloated but correctly-extracted page is healthy (the Tel Aviv lesson)', () => {
+  // Verified 2026-07-16: Tel Aviv's 46,634 chars yield 7 tenders, and 7 is
+  // CORRECT — the page has 40 tender rows but only 7 with a future deadline;
+  // the rest are closed. High chars-per-tender is bloat, not under-extraction,
+  // so it must NOT raise any signal.
   const tlv = assessSite({ previousTenders: tenders(7), mergedTenders: tenders(7), cleanedTextLength: 46634 });
-  assert.ok(tlv.signals.includes(SIGNALS.LOW_YIELD));
-  assert.strictEqual(tlv.level, LEVELS.WARN);
-
-  // חולון measured 2026-07-15: 11,369 chars -> 59 tenders = 193 chars/tender
-  const holon = assessSite({ previousTenders: tenders(59), mergedTenders: tenders(59), cleanedTextLength: 11369 });
-  assert.ok(!holon.signals.includes(SIGNALS.LOW_YIELD));
+  assert.strictEqual(tlv.level, LEVELS.OK);
+  assert.deepStrictEqual(tlv.signals, []);
 });
 
 test('every tender losing a field warns', () => {
