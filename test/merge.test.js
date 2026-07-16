@@ -106,3 +106,11 @@ test('titleOnPage compares normalized text and rejects absent titles', () => {
   assert.strictEqual(titleOnPage('אספקת מחשבים ניידים לבתי הספר היסודיים', norm), false);
   assert.strictEqual(titleOnPage('', norm), false);
 });
+
+test('numberOnPage matches RTL year-first rendering (the Haifa bug)', () => {
+  // Haifa's page renders "25/2026" as "2026 / 25" (RTL linearization).
+  assert.strictEqual(numberOnPage('25/2026', 'מכרז פומבי 2026 / 25 להפעלת מזנון'), true);
+  assert.strictEqual(numberOnPage('1607/2026', 'הזמנה 2026 / 1607 להציע הצעות'), true);
+  // must NOT loosen into matching date-like strings for a different number
+  assert.strictEqual(numberOnPage('26/2026', 'ההגשה עד 26/05 בלבד ללא מספר'), false);
+});
