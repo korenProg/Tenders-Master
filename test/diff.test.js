@@ -1,32 +1,46 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
 const { diff, isDiffTooLarge, buildChunks } = require('../lib/diff');
+const { buildKeyHashes } = require('../lib/text');
 
-test('diff detects added and removed keys, ignoring null-key noise lines', () => {
+test('diff splits added, removed, changed and unchanged keys', () => {
   const entries = [
-    { line: 'שורה א', key: 'k1' },
-    { line: 'שורה ב', key: 'k2' },
+    { line: 'מכרז ראשון לאספקת ריהוט משרדי', key: 'k1' },
+    { line: 'מכרז שני לשירותי גינון בפארק', key: 'k2' }
+  ];
+  const fresh = buildKeyHashes(entries);
+  const cached = { k1: fresh.k1, k2: 'STALE', k3: 'GONE' };
+  const { addedKeys, removedKeys, changedKeys, newKeyHashes } = diff(cached, entries);
+  assert.deepStrictEqual(addedKeys, []);
+  assert.deepStrictEqual(removedKeys, ['k3']);
+  assert.deepStrictEqual(changedKeys, ['k2']);
+  assert.deepStrictEqual(newKeyHashes, fresh);
+});
+
+test('diff reports a genuinely new key as added, ignoring null-key noise', () => {
+  const entries = [
+    { line: 'מכרז חדש לחלוטין לאספקת מחשבים ניידים', key: 'kNew' },
     { line: 'רעש', key: null }
   ];
-  const { addedKeys, removedKeys, newKeys } = diff(['k1', 'k3'], entries);
-  assert.deepStrictEqual(addedKeys, ['k2']);
-  assert.deepStrictEqual(removedKeys, ['k3']);
-  assert.deepStrictEqual([...newKeys].sort(), ['k1', 'k2']);
+  const { addedKeys, changedKeys, removedKeys } = diff({}, entries);
+  assert.deepStrictEqual(addedKeys, ['kNew']);
+  assert.deepStrictEqual(changedKeys, []);
+  assert.deepStrictEqual(removedKeys, []);
 });
 
-test('diff deduplicates repeated keys', () => {
-  const entries = [
-    { line: 'א', key: 'k1' },
-    { line: 'ב', key: 'k1' }
-  ];
-  const { newKeys } = diff([], entries);
-  assert.deepStrictEqual(newKeys, ['k1']);
+test('a deadline-only change surfaces as a changedKey (the accuracy fix)', () => {
+  const before = [{ line: 'מכרז לניקיון מועד אחרון 15/08/2026', key: 'kd' }];
+  const after  = [{ line: 'מכרז לניקיון מועד אחרון 30/08/2026', key: 'kd' }];
+  const { addedKeys, removedKeys, changedKeys } = diff(buildKeyHashes(before), after);
+  assert.deepStrictEqual(addedKeys, []);
+  assert.deepStrictEqual(removedKeys, []);
+  assert.deepStrictEqual(changedKeys, ['kd']);
 });
 
-test('isDiffTooLarge triggers above 50% and on empty pages', () => {
-  assert.strictEqual(isDiffTooLarge(['a', 'b', 'c'], [], 4, 4), true);  // 3/4 > 0.5
-  assert.strictEqual(isDiffTooLarge(['a'], ['b'], 4, 4), false);        // 2/4 = 0.5 → not "too large"
-  assert.strictEqual(isDiffTooLarge([], [], 0, 0), true);               // nothing to compare → fall back
+test('isDiffTooLarge counts changed keys and triggers above 50%', () => {
+  assert.strictEqual(isDiffTooLarge(['a'], [], ['b'], 4, 4), false);       // 2/4 = 0.5
+  assert.strictEqual(isDiffTooLarge(['a'], [], ['b', 'c'], 4, 4), true);   // 3/4 > 0.5
+  assert.strictEqual(isDiffTooLarge([], [], [], 0, 0), true);              // nothing to compare
 });
 
 test('buildChunks merges overlapping windows into one chunk of original lines', () => {

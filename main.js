@@ -3,7 +3,8 @@ const axios = require('axios');
 require('dotenv').config();
 
 const { superCleanText, buildEntries } = require('./lib/text');
-const { loadCache, saveCache, getSiteEntry, makeSiteEntry } = require('./lib/cache');
+const { getSiteEntry, makeSiteEntry } = require('./lib/cache');
+const storage = require('./lib/storage');
 const { diff, isDiffTooLarge, buildChunks } = require('./lib/diff');
 const { mergeTenders } = require('./lib/merge');
 const { MUNICIPALITIES } = require('./lib/sites');
@@ -70,7 +71,6 @@ async function validateAndDeliver(rawTenders, cleanedText, previousTenders) {
 async function run() {
   console.log("🚀 Starting Incremental Scraper Run (Line-Diff Extraction)...");
   const startTime = Date.now();
-  const cache = loadCache();
 
   for (let i = 0; i < MUNICIPALITIES.length; i++) {
     const muni = MUNICIPALITIES[i];
@@ -108,20 +108,19 @@ async function run() {
 
       const cleanedCityText = superCleanText(fullCityRawText);
       const entries = buildEntries(cleanedCityText);
-      const siteEntry = getSiteEntry(cache, muni.url);
-      const cachedKeys = siteEntry ? siteEntry.stableKeys : [];
-      const { addedKeys, removedKeys, newKeys } = diff(cachedKeys, entries);
+      const siteEntry = getSiteEntry(storage.loadRaw(muni.url));
+      const cachedKeyHashes = siteEntry ? siteEntry.keyHashes : {};
+      const { addedKeys, removedKeys, changedKeys, newKeyHashes } = diff(cachedKeyHashes, entries);
 
       // Case 1: nothing changed since last run
-      if (siteEntry && addedKeys.length === 0 && removedKeys.length === 0) {
+      if (siteEntry && addedKeys.length === 0 && removedKeys.length === 0 && changedKeys.length === 0) {
         if (siteEntry.pendingDelivery && siteEntry.tenders.length > 0) {
           console.log(`📡 Content unchanged but last delivery failed — resending ${siteEntry.tenders.length} cached tenders (0 tokens)...`);
           // siteEntry.tenders is both the payload and the baseline: an unchanged
           // page must never look like a collapse.
           const { ok } = await validateAndDeliver(siteEntry.tenders, cleanedCityText, siteEntry.tenders);
           if (ok) {
-            cache[muni.url] = makeSiteEntry(siteEntry.stableKeys, siteEntry.tenders, false);
-            saveCache(cache);
+            storage.saveRaw(muni.url, makeSiteEntry(siteEntry.keyHashes, siteEntry.tenders, false));
             console.log(`✅ Webhook accepted pending delivery. Cache updated.`);
           }
         } else {
@@ -132,17 +131,17 @@ async function run() {
       }
 
       // Case 2: choose full vs incremental extraction
-      const useFullPath = !siteEntry || isDiffTooLarge(addedKeys, removedKeys, cachedKeys.length, newKeys.length);
+      const useFullPath = !siteEntry || isDiffTooLarge(addedKeys, removedKeys, changedKeys, Object.keys(cachedKeyHashes).length, Object.keys(newKeyHashes).length);
 
       let newTenders = [];
       if (useFullPath) {
         const reason = !siteEntry ? "first run / legacy cache" : "diff too large — safety fallback";
         console.log(`📄 Full extraction (${reason}): sending ${cleanedCityText.length} chars to AI...`);
         newTenders = await extractAndCount(cleanedCityText);
-      } else if (addedKeys.length > 0) {
-        const chunks = buildChunks(entries, addedKeys);
+      } else if (addedKeys.length + changedKeys.length > 0) {
+        const chunks = buildChunks(entries, [...addedKeys, ...changedKeys]);
         const excerptText = chunks.join('\n---\n');
-        console.log(`✂️ Incremental: ${addedKeys.length} new / ${removedKeys.length} removed lines → sending only ${excerptText.length} of ${cleanedCityText.length} chars to AI...`);
+        console.log(`✂️ Incremental: ${addedKeys.length} new / ${changedKeys.length} changed / ${removedKeys.length} removed lines → sending only ${excerptText.length} of ${cleanedCityText.length} chars to AI...`);
         newTenders = await extractAndCount(excerptText, { excerpt: true });
       } else {
         console.log(`🗑️ Removals only (${removedKeys.length} lines gone) — no AI call needed. 0 tokens.`);
@@ -161,24 +160,21 @@ async function run() {
         // Save BEFORE delivery: a webhook failure must never cost a second AI call.
         // RAW merged, never the validated list — validation would flip a degraded
         // tender's upsertKey from num: to title: and duplicate it next run.
-        cache[muni.url] = makeSiteEntry(newKeys, merged, true);
-        saveCache(cache);
+        storage.saveRaw(muni.url, makeSiteEntry(newKeyHashes, merged, true));
 
         console.log(`📡 Streaming structured tenders to Lovable Webhook...`);
         const { ok, kept } = await validateAndDeliver(merged, cleanedCityText, siteEntry ? siteEntry.tenders : []);
         RUN_STATS.dropped += merged.length - kept.length;
 
         if (ok) {
-          cache[muni.url] = makeSiteEntry(newKeys, merged, false);
-          saveCache(cache);
+          storage.saveRaw(muni.url, makeSiteEntry(newKeyHashes, merged, false));
           console.log(`✅ Webhook Accepted! Status: 200. Delivered ${kept.length}/${merged.length} validated. Cache updated.`);
         } else {
           console.log(`⚠️ Webhook returned unexpected status. Extraction saved — will resend next run without AI.`);
         }
       } else if (cleanedCityText.length > 1500) {
         console.log(`✅ Page verified healthy with 0 active tenders. Updating Cache.`);
-        cache[muni.url] = makeSiteEntry(newKeys, [], false);
-        saveCache(cache);
+        storage.saveRaw(muni.url, makeSiteEntry(newKeyHashes, [], false));
       } else {
         console.log(`⚠️ Warning: Page content seems too low or failed. Skipping cache to allow retry.`);
       }
