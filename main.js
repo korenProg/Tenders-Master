@@ -9,6 +9,7 @@ const { diff, isDiffTooLarge, buildChunks } = require('./lib/diff');
 const { mergeTenders } = require('./lib/merge');
 const { MUNICIPALITIES } = require('./lib/sites');
 const { extractTenders } = require('./lib/ai');
+const { paginate, makePuppeteerDriver } = require('./lib/paginator');
 const { validateTenders } = require('./lib/validate');
 const { assessSite, LEVELS } = require('./lib/health');
 
@@ -90,8 +91,10 @@ async function run() {
 
       await page.goto(muni.url, { waitUntil: 'domcontentloaded', timeout: 60000 });
 
-      const targetModule = require(muni.script);
-      const scrapeResult = await targetModule.scrape(page);
+      // script (custom file) wins; otherwise the generic config-driven paginator.
+      const scrapeResult = muni.script
+        ? await require(muni.script).scrape(page)
+        : await paginate(makePuppeteerDriver(page, muni.pagination || {}), muni.pagination || {});
 
       if (!scrapeResult || (typeof scrapeResult === 'string' && scrapeResult.length < 100) || (Array.isArray(scrapeResult) && scrapeResult.length === 0)) {
         console.log(`⚠️ No content extracted for ${muni.publisher}.`);
