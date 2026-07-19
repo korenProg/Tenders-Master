@@ -114,3 +114,18 @@ test('numberOnPage matches RTL year-first rendering (the Haifa bug)', () => {
   // must NOT loosen into matching date-like strings for a different number
   assert.strictEqual(numberOnPage('26/2026', 'ההגשה עד 26/05 בלבד ללא מספר'), false);
 });
+
+test('numberOnPage matches dash-separated rendering (the Herzliya format)', () => {
+  assert.strictEqual(numberOnPage('33/2026', "מכרז פומבי מס' 33-2026-20 בדבר הפעלה"), true);
+  assert.strictEqual(numberOnPage('9/2026', 'טלפון 09-9591 ללא מכרז'), false); // digit guard holds
+});
+
+test('titleOnPage survives a mid-title excision (the Modiin-Illit case)', () => {
+  // Page: "מכרז פומבי מס' 7/2026 לשטיפה יזומה..." — Gemini cleans out "מס' 7/2026",
+  // so the head is no longer contiguous but the tail still is.
+  const page = "שם המכרז: מכרז פומבי מס' 7/2026 לשטיפה יזומה, פתיחת סתימות ביוב וניקוז, שאיבת בורות שומן";
+  const norm = normalizeForTitleMatch(page);
+  assert.strictEqual(titleOnPage('מכרז פומבי לשטיפה יזומה, פתיחת סתימות ביוב וניקוז, שאיבת בורות שומן', norm), true);
+  // a fabricated title still fails — neither head nor tail is on the page
+  assert.strictEqual(titleOnPage('מכרז לאספקת מחשבים ניידים לבתי הספר בעיר', norm), false);
+});
