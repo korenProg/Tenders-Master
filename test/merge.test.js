@@ -129,3 +129,30 @@ test('titleOnPage survives a mid-title excision (the Modiin-Illit case)', () => 
   // a fabricated title still fails — neither head nor tail is on the page
   assert.strictEqual(titleOnPage('מכרז לאספקת מחשבים ניידים לבתי הספר בעיר', norm), false);
 });
+
+test('re-extraction with a differently-parsed number updates instead of duplicating (the Herzliya duplicate)', () => {
+  // Cached from run 1: Gemini parsed "26-2026-20" as 26/2026.
+  const cached = makeTender({
+    title: "מכרז פומבי מס' 26-2026-20 להפעלת וניהול שלושה מזנונים באצטדיון הרצליה",
+    tender_number: '26/2026'
+  });
+  // Run 2: same tender, number parsed differently and title trimmed.
+  const newRaw = [{
+    title: 'להפעלת וניהול שלושה מזנונים באצטדיון הרצליה גוש 6525',
+    tender_number: '26-20/2026',
+    deadline_date: '01/09/2026'
+  }];
+  const pageText = "מכרז פומבי מס' 26-2026-20 להפעלת וניהול שלושה מזנונים באצטדיון הרצליה גוש 6525";
+  const merged = mergeTenders([cached], newRaw, pageText, PUB, URL);
+  assert.strictEqual(merged.length, 1, 'must update the cached tender, not append a duplicate');
+  assert.strictEqual(merged[0].tender_number, '26/2026', 'keeps the cached number as the stable identity');
+  assert.strictEqual(merged[0].deadline_date, '01/09/2026', 'takes the fresh deadline');
+});
+
+test('title fallback does not collapse two genuinely different tenders', () => {
+  const cached = makeTender({ title: 'מכרז לאספקת ריהוט משרדי לעירייה', tender_number: '12/2026' });
+  const newRaw = [{ title: 'מכרז לאספקת מחשבים ניידים לבתי הספר', tender_number: '77/2026', deadline_date: 'אין' }];
+  const pageText = 'מכרז 12/2026 לאספקת ריהוט משרדי\nמכרז 77/2026 לאספקת מחשבים ניידים לבתי הספר';
+  const merged = mergeTenders([cached], newRaw, pageText, PUB, URL);
+  assert.strictEqual(merged.length, 2, 'different titles must stay separate');
+});
