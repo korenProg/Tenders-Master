@@ -1,7 +1,7 @@
 # Concurrency — Bounded Worker Pool — Design
 
 **Date:** 2026-08-06
-**Status:** Draft, pending review
+**Status:** Draft. Browser strategy confirmed 2026-08-06 (one browser per site); timeout-abort and Gemini-retry decisions still open.
 **Phase:** 4 of 5 on the road to ~1000 sites (follows the config-driven paginator)
 
 ## תקציר בעברית
@@ -82,6 +82,8 @@ const results = await runPool(MUNICIPALITIES, processSite, { concurrency: CONCUR
 `Promise.all` over fixed chunks of N is the tempting one-liner and is wrong here: each chunk runs as long as its slowest member, and site durations vary by an order of magnitude (a 1-page site is ~12s; a 5-page site with an iframe scan is ~60s). Slot-based dispatch keeps all N workers busy until the queue drains, which is what produces the near-linear speedup.
 
 ### Browser strategy: one browser per site, N at a time
+
+**Decided 2026-08-06.** The alternative (one shared Chrome with N isolated `BrowserContext`s) buys higher concurrency per GB but lets a single browser crash take down every in-flight site. Isolation and blast radius won over memory efficiency; revisit only if RAM becomes the actual blocker at scale.
 
 Deliberately **not** switching to a shared browser with N pages or N incognito contexts. Launching per site is what happens today, so every site keeps a pristine profile with no cookie/storage bleed between municipalities, and a page crash takes down one site rather than N. The only change is that N launches overlap.
 
