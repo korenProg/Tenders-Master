@@ -12,9 +12,21 @@ const { extractTenders } = require('./lib/ai');
 const { paginate, makePuppeteerDriver } = require('./lib/paginator');
 const { validateTenders } = require('./lib/validate');
 const { assessSite, LEVELS } = require('./lib/health');
+const { runPool, withTimeout } = require('./lib/pool');
 
 const WEBHOOK_URL = process.env.WEBHOOK_URL;
 const WEBHOOK_KEY = process.env.ELIYAHO_WEBHOOK_KEY;
+
+// How many sites run at once. CONCURRENCY=1 reproduces the old sequential
+// behavior exactly — the escape hatch, and the A/B baseline for
+// scripts/concurrency-check.js. Memory is the real cap: each site gets its own
+// Chrome (~150–300MB), which is the price of crash isolation between sites.
+const CONCURRENCY = Math.max(1, parseInt(process.env.CONCURRENCY || '4', 10) || 1);
+
+// Per-site ceiling, ~5× the slowest observed site. On expiry the pool frees the
+// slot and records the site failed; the cache is simply not updated, which is
+// already safe. SITE_TIMEOUT_MS=0 disables it.
+const SITE_TIMEOUT_MS = Math.max(0, parseInt(process.env.SITE_TIMEOUT_MS || '300000', 10) || 0);
 
 const RUN_STATS = { aiCalls: 0, inputTokens: 0, outputTokens: 0, alerts: 0, warnings: 0, dropped: 0 };
 
@@ -187,21 +199,28 @@ async function run() {
   console.log("🚀 Starting Incremental Scraper Run (Line-Diff Extraction)...");
   const startTime = Date.now();
 
-  for (let i = 0; i < MUNICIPALITIES.length; i++) {
-    try {
-      await processSite(MUNICIPALITIES[i], i);
-    } catch (err) {
-      console.error(`❌ Error with ${MUNICIPALITIES[i].publisher}:`, err.message);
-    }
-    if (i < MUNICIPALITIES.length - 1) {
-      await new Promise(r => setTimeout(r, 4000));
-    }
-  }
+  console.log(`⚙️ Concurrency: ${CONCURRENCY} | per-site timeout: ${SITE_TIMEOUT_MS ? `${SITE_TIMEOUT_MS / 1000}s` : 'off'}`);
+
+  // Slot-based dispatch, NOT batches: site durations vary by an order of
+  // magnitude, and a chunked Promise.all would idle N-1 workers waiting on the
+  // slowest member of each chunk.
+  const results = await runPool(
+    MUNICIPALITIES,
+    (muni, i) => withTimeout(processSite(muni, i), SITE_TIMEOUT_MS, muni.publisher),
+    { concurrency: CONCURRENCY }
+  );
+
+  const failures = results
+    .map((r, i) => (r.ok ? null : { publisher: MUNICIPALITIES[i].publisher, error: r.error }))
+    .filter(Boolean);
+
   const minutes = ((Date.now() - startTime) / 60000).toFixed(1);
   console.log("\n════════════════════════════════════════");
   console.log(`🎯 RUN FINISHED in ${minutes} minutes`);
   console.log(`💰 AI calls: ${RUN_STATS.aiCalls}/${MUNICIPALITIES.length} sites | input tokens: ${RUN_STATS.inputTokens} | output tokens: ${RUN_STATS.outputTokens}`);
   console.log(`🩺 Health: ${RUN_STATS.alerts} alert(s), ${RUN_STATS.warnings} warning(s) | validation dropped ${RUN_STATS.dropped} tender(s)`);
+  console.log(`🧵 Sites: ${MUNICIPALITIES.length - failures.length}/${MUNICIPALITIES.length} completed${failures.length ? ` | ${failures.length} failed:` : ''}`);
+  for (const f of failures) console.log(`   ❌ ${f.publisher}: ${f.error.message}`);
   console.log("════════════════════════════════════════");
 }
 
