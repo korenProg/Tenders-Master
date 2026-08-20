@@ -21,12 +21,21 @@ const WEBHOOK_KEY = process.env.ELIYAHO_WEBHOOK_KEY;
 // behavior exactly — the escape hatch, and the A/B baseline for
 // scripts/concurrency-check.js. Memory is the real cap: each site gets its own
 // Chrome (~150–300MB), which is the price of crash isolation between sites.
-const CONCURRENCY = Math.max(1, parseInt(process.env.CONCURRENCY || '4', 10) || 1);
+// Unparseable input falls back to the default (4) rather than silently
+// resolving to 1 — garbage must not masquerade as the documented default.
+const rawConcurrency = process.env.CONCURRENCY;
+const parsedConcurrency = rawConcurrency === undefined ? 4 : parseInt(rawConcurrency, 10);
+const CONCURRENCY = Math.max(1, Number.isNaN(parsedConcurrency) ? 4 : parsedConcurrency);
 
 // Per-site ceiling, ~5× the slowest observed site. On expiry the pool frees the
 // slot and records the site failed; the cache is simply not updated, which is
-// already safe. SITE_TIMEOUT_MS=0 disables it.
-const SITE_TIMEOUT_MS = Math.max(0, parseInt(process.env.SITE_TIMEOUT_MS || '300000', 10) || 0);
+// already safe. SITE_TIMEOUT_MS=0 is a documented, supported escape hatch that
+// disables the timeout — but unparseable input must fail toward the SAFE
+// extreme (the 300000 default), never toward "disabled": a hung site plus a
+// mistyped env var must not leave a pool slot blocked forever.
+const rawTimeout = process.env.SITE_TIMEOUT_MS;
+const parsedTimeout = rawTimeout === undefined ? 300000 : parseInt(rawTimeout, 10);
+const SITE_TIMEOUT_MS = Math.max(0, Number.isNaN(parsedTimeout) ? 300000 : parsedTimeout);
 
 const RUN_STATS = { aiCalls: 0, inputTokens: 0, outputTokens: 0, alerts: 0, warnings: 0, dropped: 0 };
 
