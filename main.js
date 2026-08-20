@@ -69,130 +69,132 @@ async function validateAndDeliver(rawTenders, cleanedText, previousTenders) {
   return { ok, kept, health };
 }
 
+// One site, end to end: launch → scrape → diff → extract? → merge → save →
+// validate → deliver. This is the pool's worker (Task 5). It closes its own
+// browser in `finally`, which is also what makes a timed-out orphan clean up
+// after itself once the pool has moved on.
+async function processSite(muni, index) {
+  console.log(`\n=== [${index + 1}/${MUNICIPALITIES.length}] Processing: ${muni.publisher} ===`);
+
+  let browser;
+  try {
+    // HEADFUL=1 opens a visible browser window — for demos and debugging.
+    browser = await puppeteer.launch({
+      headless: process.env.HEADFUL ? false : "new",
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-blink-features=AutomationControlled']
+    });
+
+    const page = await browser.newPage();
+    page.setDefaultNavigationTimeout(60000);
+    await page.setViewport({ width: 1280, height: 800 });
+    await page.setUserAgent('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+
+    await page.goto(muni.url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+
+    // script (custom file) wins; otherwise the generic config-driven paginator.
+    const scrapeResult = muni.script
+      ? await require(muni.script).scrape(page)
+      : await paginate(makePuppeteerDriver(page, muni.pagination || {}), muni.pagination || {});
+
+    if (!scrapeResult || (typeof scrapeResult === 'string' && scrapeResult.length < 100) || (Array.isArray(scrapeResult) && scrapeResult.length === 0)) {
+      console.log(`⚠️ No content extracted for ${muni.publisher}.`);
+      return;
+    }
+
+    const pages = Array.isArray(scrapeResult) ? scrapeResult : [scrapeResult];
+
+    let fullCityRawText = "";
+    for (let p = 0; p < pages.length; p++) {
+      fullCityRawText += `\n--- PAGE ${p + 1} ---\n` + pages[p];
+    }
+
+    const cleanedCityText = superCleanText(fullCityRawText);
+    const entries = buildEntries(cleanedCityText);
+    const siteEntry = getSiteEntry(storage.loadRaw(muni.url));
+    const cachedKeyHashes = siteEntry ? siteEntry.keyHashes : {};
+    const { addedKeys, removedKeys, changedKeys, newKeyHashes } = diff(cachedKeyHashes, entries);
+
+    // Case 1: nothing changed since last run
+    if (siteEntry && addedKeys.length === 0 && removedKeys.length === 0 && changedKeys.length === 0) {
+      if (siteEntry.pendingDelivery && siteEntry.tenders.length > 0) {
+        console.log(`📡 Content unchanged but last delivery failed — resending ${siteEntry.tenders.length} cached tenders (0 tokens)...`);
+        // siteEntry.tenders is both the payload and the baseline: an unchanged
+        // page must never look like a collapse.
+        const { ok } = await validateAndDeliver(siteEntry.tenders, cleanedCityText, siteEntry.tenders);
+        if (ok) {
+          storage.saveRaw(muni.url, makeSiteEntry(siteEntry.keyHashes, siteEntry.tenders, false));
+          console.log(`✅ Webhook accepted pending delivery. Cache updated.`);
+        }
+      } else {
+        console.log(`⏭️ Green Light: Website content is IDENTICAL to last run. Skipping AI.`);
+      }
+      return;
+    }
+
+    // Case 2: choose full vs incremental extraction
+    const useFullPath = !siteEntry || isDiffTooLarge(addedKeys, removedKeys, changedKeys, Object.keys(cachedKeyHashes).length, Object.keys(newKeyHashes).length);
+
+    let newTenders = [];
+    if (useFullPath) {
+      const reason = !siteEntry ? "first run / legacy cache" : "diff too large — safety fallback";
+      console.log(`📄 Full extraction (${reason}): sending ${cleanedCityText.length} chars to AI...`);
+      newTenders = await extractAndCount(cleanedCityText);
+    } else if (addedKeys.length + changedKeys.length > 0) {
+      const chunks = buildChunks(entries, [...addedKeys, ...changedKeys]);
+      const excerptText = chunks.join('\n---\n');
+      console.log(`✂️ Incremental: ${addedKeys.length} new / ${changedKeys.length} changed / ${removedKeys.length} removed lines → sending only ${excerptText.length} of ${cleanedCityText.length} chars to AI...`);
+      newTenders = await extractAndCount(excerptText, { excerpt: true });
+    } else {
+      console.log(`🗑️ Removals only (${removedKeys.length} lines gone) — no AI call needed. 0 tokens.`);
+    }
+
+    if (newTenders === null) {
+      console.log(`⚠️ AI extraction failed. Cache NOT updated — will retry next run.`);
+      return;
+    }
+
+    const merged = mergeTenders(useFullPath ? [] : siteEntry.tenders, newTenders, cleanedCityText, muni.publisher, muni.url);
+    console.log(`✨ Merged list: ${merged.length} tenders (${newTenders.length} newly extracted).`);
+
+    if (merged.length > 0) {
+      // Save BEFORE delivery: a webhook failure must never cost a second AI call.
+      // RAW merged, never the validated list — validation would flip a degraded
+      // tender's upsertKey from num: to title: and duplicate it next run.
+      storage.saveRaw(muni.url, makeSiteEntry(newKeyHashes, merged, true));
+
+      console.log(`📡 Streaming structured tenders to Lovable Webhook...`);
+      const { ok, kept } = await validateAndDeliver(merged, cleanedCityText, siteEntry ? siteEntry.tenders : []);
+      RUN_STATS.dropped += merged.length - kept.length;
+
+      if (ok) {
+        storage.saveRaw(muni.url, makeSiteEntry(newKeyHashes, merged, false));
+        console.log(`✅ Webhook Accepted! Status: 200. Delivered ${kept.length}/${merged.length} validated. Cache updated.`);
+      } else {
+        console.log(`⚠️ Webhook returned unexpected status. Extraction saved — will resend next run without AI.`);
+      }
+    } else if (cleanedCityText.length > 1500) {
+      console.log(`✅ Page verified healthy with 0 active tenders. Updating Cache.`);
+      storage.saveRaw(muni.url, makeSiteEntry(newKeyHashes, [], false));
+    } else {
+      console.log(`⚠️ Warning: Page content seems too low or failed. Skipping cache to allow retry.`);
+    }
+  } finally {
+    if (browser) await browser.close().catch(() => {});
+  }
+}
+
 async function run() {
   console.log("🚀 Starting Incremental Scraper Run (Line-Diff Extraction)...");
   const startTime = Date.now();
 
   for (let i = 0; i < MUNICIPALITIES.length; i++) {
-    const muni = MUNICIPALITIES[i];
-    console.log(`\n=== [${i + 1}/${MUNICIPALITIES.length}] Processing: ${muni.publisher} ===`);
-
-    let browser;
     try {
-      // HEADFUL=1 opens a visible browser window — for demos and debugging.
-      browser = await puppeteer.launch({
-        headless: process.env.HEADFUL ? false : "new",
-        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-blink-features=AutomationControlled']
-      });
-
-      const page = await browser.newPage();
-      page.setDefaultNavigationTimeout(60000);
-      await page.setViewport({ width: 1280, height: 800 });
-      await page.setUserAgent('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
-
-      await page.goto(muni.url, { waitUntil: 'domcontentloaded', timeout: 60000 });
-
-      // script (custom file) wins; otherwise the generic config-driven paginator.
-      const scrapeResult = muni.script
-        ? await require(muni.script).scrape(page)
-        : await paginate(makePuppeteerDriver(page, muni.pagination || {}), muni.pagination || {});
-
-      if (!scrapeResult || (typeof scrapeResult === 'string' && scrapeResult.length < 100) || (Array.isArray(scrapeResult) && scrapeResult.length === 0)) {
-        console.log(`⚠️ No content extracted for ${muni.publisher}.`);
-        await browser.close();
-        continue;
-      }
-
-      const pages = Array.isArray(scrapeResult) ? scrapeResult : [scrapeResult];
-
-      let fullCityRawText = "";
-      for (let p = 0; p < pages.length; p++) {
-        fullCityRawText += `\n--- PAGE ${p + 1} ---\n` + pages[p];
-      }
-
-      const cleanedCityText = superCleanText(fullCityRawText);
-      const entries = buildEntries(cleanedCityText);
-      const siteEntry = getSiteEntry(storage.loadRaw(muni.url));
-      const cachedKeyHashes = siteEntry ? siteEntry.keyHashes : {};
-      const { addedKeys, removedKeys, changedKeys, newKeyHashes } = diff(cachedKeyHashes, entries);
-
-      // Case 1: nothing changed since last run
-      if (siteEntry && addedKeys.length === 0 && removedKeys.length === 0 && changedKeys.length === 0) {
-        if (siteEntry.pendingDelivery && siteEntry.tenders.length > 0) {
-          console.log(`📡 Content unchanged but last delivery failed — resending ${siteEntry.tenders.length} cached tenders (0 tokens)...`);
-          // siteEntry.tenders is both the payload and the baseline: an unchanged
-          // page must never look like a collapse.
-          const { ok } = await validateAndDeliver(siteEntry.tenders, cleanedCityText, siteEntry.tenders);
-          if (ok) {
-            storage.saveRaw(muni.url, makeSiteEntry(siteEntry.keyHashes, siteEntry.tenders, false));
-            console.log(`✅ Webhook accepted pending delivery. Cache updated.`);
-          }
-        } else {
-          console.log(`⏭️ Green Light: Website content is IDENTICAL to last run. Skipping AI.`);
-        }
-        await browser.close();
-        continue;
-      }
-
-      // Case 2: choose full vs incremental extraction
-      const useFullPath = !siteEntry || isDiffTooLarge(addedKeys, removedKeys, changedKeys, Object.keys(cachedKeyHashes).length, Object.keys(newKeyHashes).length);
-
-      let newTenders = [];
-      if (useFullPath) {
-        const reason = !siteEntry ? "first run / legacy cache" : "diff too large — safety fallback";
-        console.log(`📄 Full extraction (${reason}): sending ${cleanedCityText.length} chars to AI...`);
-        newTenders = await extractAndCount(cleanedCityText);
-      } else if (addedKeys.length + changedKeys.length > 0) {
-        const chunks = buildChunks(entries, [...addedKeys, ...changedKeys]);
-        const excerptText = chunks.join('\n---\n');
-        console.log(`✂️ Incremental: ${addedKeys.length} new / ${changedKeys.length} changed / ${removedKeys.length} removed lines → sending only ${excerptText.length} of ${cleanedCityText.length} chars to AI...`);
-        newTenders = await extractAndCount(excerptText, { excerpt: true });
-      } else {
-        console.log(`🗑️ Removals only (${removedKeys.length} lines gone) — no AI call needed. 0 tokens.`);
-      }
-
-      if (newTenders === null) {
-        console.log(`⚠️ AI extraction failed. Cache NOT updated — will retry next run.`);
-        await browser.close();
-        continue;
-      }
-
-      const merged = mergeTenders(useFullPath ? [] : siteEntry.tenders, newTenders, cleanedCityText, muni.publisher, muni.url);
-      console.log(`✨ Merged list: ${merged.length} tenders (${newTenders.length} newly extracted).`);
-
-      if (merged.length > 0) {
-        // Save BEFORE delivery: a webhook failure must never cost a second AI call.
-        // RAW merged, never the validated list — validation would flip a degraded
-        // tender's upsertKey from num: to title: and duplicate it next run.
-        storage.saveRaw(muni.url, makeSiteEntry(newKeyHashes, merged, true));
-
-        console.log(`📡 Streaming structured tenders to Lovable Webhook...`);
-        const { ok, kept } = await validateAndDeliver(merged, cleanedCityText, siteEntry ? siteEntry.tenders : []);
-        RUN_STATS.dropped += merged.length - kept.length;
-
-        if (ok) {
-          storage.saveRaw(muni.url, makeSiteEntry(newKeyHashes, merged, false));
-          console.log(`✅ Webhook Accepted! Status: 200. Delivered ${kept.length}/${merged.length} validated. Cache updated.`);
-        } else {
-          console.log(`⚠️ Webhook returned unexpected status. Extraction saved — will resend next run without AI.`);
-        }
-      } else if (cleanedCityText.length > 1500) {
-        console.log(`✅ Page verified healthy with 0 active tenders. Updating Cache.`);
-        storage.saveRaw(muni.url, makeSiteEntry(newKeyHashes, [], false));
-      } else {
-        console.log(`⚠️ Warning: Page content seems too low or failed. Skipping cache to allow retry.`);
-      }
-
-      await browser.close();
-      if (i < MUNICIPALITIES.length - 1) {
-        await new Promise(r => setTimeout(r, 4000));
-      }
-
+      await processSite(MUNICIPALITIES[i], i);
     } catch (err) {
-      console.error(`❌ Error with ${muni.publisher}:`, err.message);
-      if (browser) {
-        await browser.close().catch(() => {});
-      }
+      console.error(`❌ Error with ${MUNICIPALITIES[i].publisher}:`, err.message);
+    }
+    if (i < MUNICIPALITIES.length - 1) {
+      await new Promise(r => setTimeout(r, 4000));
     }
   }
   const minutes = ((Date.now() - startTime) / 60000).toFixed(1);
@@ -203,4 +205,10 @@ async function run() {
   console.log("════════════════════════════════════════");
 }
 
-run();
+// Guarded so `require('./main.js')` (smoke checks, future tests) does not kick
+// off a live 14-site run. `node main.js` is unaffected.
+if (require.main === module) {
+  run();
+}
+
+module.exports = { processSite, run };
