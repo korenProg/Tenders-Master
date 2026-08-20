@@ -20,7 +20,7 @@ Two decisions the spec left open were settled on 2026-08-20, before this plan wa
 - **No new npm dependencies.** `node:test` and `node:assert` only, matching every existing test file.
 - **CommonJS.** `require` / `module.exports`. No ESM, no build step, no TypeScript.
 - **`npm test` stays offline and zero-token.** No network, no browser, no Gemini call, no `.env` requirement in any test added by this plan. The AI retry tests use an injected fake client.
-- **Hebrew unicode in regexes must be written as escapes** (`֐-׿`), never as literal characters in a character class. Hebrew inside plain string literals (`'הבא'`) is fine.
+- **Hebrew unicode in regexes must be written as escape sequences** — the six characters backslash-u-0-5-9-0 through backslash-u-0-5-F-F, i.e. `\u0590-\u05FF` — never as literal characters in a character class. Hebrew inside plain string literals (`hebrew text`) is fine and used throughout.
 - **`CONCURRENCY` env var, default 4.** `CONCURRENCY=1` must reproduce today's sequential behavior exactly — it is both the escape hatch and the A/B baseline.
 - **`SITE_TIMEOUT_MS` env var, default 300000** (5 minutes). `SITE_TIMEOUT_MS=0` disables the timeout.
 - **Gemini retry: 3 attempts total, base backoff 1000ms, full jitter.**
@@ -259,7 +259,7 @@ test('withTimeout rejects with a labeled error past the deadline', async () => {
     () => withTimeout(sleep(200), 20, 'עיריית חיפה'),
     (err) => {
       assert.match(err.message, /Timed out after 20ms/);
-      assert.match(err.message, /עיריית חיפה/);
+      assert.ok(err.message.includes('עיריית חיפה'), 'label must reach the message');
       return true;
     }
   );
