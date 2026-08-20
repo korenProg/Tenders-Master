@@ -78,6 +78,25 @@ test('does NOT retry a malformed (unparseable) response', async () => {
   assert.strictEqual(client.calls.n, 1);
 });
 
+test('does NOT retry a malformed response even when the truncated raw text contains a trigger word (Node embeds it in the SyntaxError message)', async () => {
+  const client = fakeClient(['rate limit test text that breaks json', TENDER]);
+  const { delays, sleep } = fakeSleep();
+  const res = await extractTenders('text', { client, sleep });
+  assert.strictEqual(res.tenders, null);
+  assert.strictEqual(client.calls.n, 1, 'a SyntaxError must never be classified as transient, regardless of the words in the unparseable text');
+  assert.deepStrictEqual(delays, []);
+});
+
+test('a transient failure followed by a non-transient failure stops after the second attempt with an honest attempts count', async () => {
+  const client = fakeClient([err('429 Too Many Requests', 429), err('API key not valid', 400)]);
+  const { delays, sleep } = fakeSleep();
+  const res = await extractTenders('text', { client, sleep });
+  assert.strictEqual(res.tenders, null);
+  assert.strictEqual(res.attempts, 2);
+  assert.strictEqual(client.calls.n, 2);
+  assert.strictEqual(delays.length, 1);
+});
+
 test('backoff grows exponentially between attempts', async () => {
   const client = fakeClient([err('503 Service Unavailable', 503), err('503', 503), err('503', 503)]);
   const { delays, sleep } = fakeSleep();
