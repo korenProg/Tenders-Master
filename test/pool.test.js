@@ -1,6 +1,6 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
-const { runPool } = require('../lib/pool');
+const { runPool, withTimeout } = require('../lib/pool');
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
@@ -99,4 +99,60 @@ test('defaults to concurrency 4 when no options are given', async () => {
   const { state, worker } = tracker(new Array(8).fill(15));
   await runPool([1, 2, 3, 4, 5, 6, 7, 8], worker);
   assert.strictEqual(state.peak, 4);
+});
+
+test('withTimeout resolves through when the work finishes in time', async () => {
+  const value = await withTimeout(sleep(5).then(() => 'fast'), 100, 'site');
+  assert.strictEqual(value, 'fast');
+});
+
+test('withTimeout rejects with a labeled error past the deadline', async () => {
+  await assert.rejects(
+    () => withTimeout(sleep(200), 20, 'עיריית חיפה'),
+    (err) => {
+      assert.match(err.message, /Timed out after 20ms/);
+      assert.ok(err.message.includes('עיריית חיפה'), 'label must reach the message');
+      return true;
+    }
+  );
+});
+
+test('withTimeout passes a real rejection through unchanged', async () => {
+  const failing = Promise.reject(new Error('scrape blew up'));
+  await assert.rejects(() => withTimeout(failing, 100, 'site'), /scrape blew up/);
+});
+
+test('a late rejection after the deadline does not surface as unhandled', async () => {
+  const seen = [];
+  const onUnhandled = (e) => seen.push(e);
+  process.on('unhandledRejection', onUnhandled);
+  try {
+    const late = new Promise((_, rej) => setTimeout(() => rej(new Error('late')), 30));
+    await assert.rejects(() => withTimeout(late, 5, 'site'), /Timed out/);
+    await sleep(60); // let the orphan reject with nobody waiting
+    assert.deepStrictEqual(seen, []);
+  } finally {
+    process.off('unhandledRejection', onUnhandled);
+  }
+});
+
+test('withTimeout with ms 0 or null disables the timeout', async () => {
+  assert.strictEqual(await withTimeout(sleep(30).then(() => 'slow'), 0, 'site'), 'slow');
+  assert.strictEqual(await withTimeout(sleep(30).then(() => 'slow'), null, 'site'), 'slow');
+});
+
+test('a timed-out task frees its pool slot immediately', async () => {
+  // One task hangs for 200ms with a 20ms ceiling; with the slot freed on time,
+  // three tasks through a pool of 1 finish in well under 200ms.
+  const t0 = Date.now();
+  const results = await runPool(
+    ['hang', 'a', 'b'],
+    (item) => withTimeout(item === 'hang' ? sleep(200) : sleep(5), 20, item),
+    { concurrency: 1 }
+  );
+  assert.strictEqual(results[0].ok, false);
+  assert.match(results[0].error.message, /Timed out/);
+  assert.strictEqual(results[1].ok, true);
+  assert.strictEqual(results[2].ok, true);
+  assert.ok(Date.now() - t0 < 150, 'slot was not freed on the deadline');
 });
