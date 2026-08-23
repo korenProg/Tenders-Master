@@ -19,7 +19,7 @@ CONCURRENCY=1 node main.js                        # sequential escape hatch (pre
 node main.js                                      # full production run
 ```
 
-`node main.js` is **not** a safe way to check your work. It drives 14 live municipality sites (~4s pause between each), spends real Gemini tokens, and POSTs to the production webhook. Prefer the unit tests; they cover every pure function. When an E2E run is genuinely needed, trim `MUNICIPALITIES` in [lib/sites.js](lib/sites.js) to one entry first.
+`node main.js` is **not** a safe way to check your work. It runs 14 live municipality sites through the worker pool (CONCURRENCY at a time), spends real Gemini tokens, and POSTs to the production webhook. Prefer the unit tests; they cover every pure function. When an E2E run is genuinely needed, trim `MUNICIPALITIES` in [lib/sites.js](lib/sites.js) to one entry first.
 
 `HEADFUL=1 node main.js` opens a visible browser window — for demos and debugging.
 
@@ -64,11 +64,11 @@ The `lib/` modules are pure and independently tested, except `ai.js` (Gemini) an
 
 ## Invariants that are easy to break
 
-**Cache is saved *before* webhook delivery**, with `pendingDelivery: true`, flipped to `false` on HTTP 200 ([main.js:164-175](main.js#L164-L175)). This is what makes a webhook failure cost 0 tokens instead of a re-extraction. Don't reorder it into the "obvious" deliver-then-save.
+**Cache is saved *before* webhook delivery**, with `pendingDelivery: true`, flipped to `false` on HTTP 200 ([main.js:203-213](main.js#L203-L213)). This is what makes a webhook failure cost 0 tokens instead of a re-extraction. Don't reorder it into the "obvious" deliver-then-save.
 
-**The cache stores the RAW merged list, never the validated `kept` list** ([main.js:40-43](main.js#L40-L43)). Validation degrades a bad tender number to `אין`, which would flip that tender's upsert key from `num:` to `title:` and duplicate it on the next run. Validation is a delivery-time filter, not a cache-time one.
+**The cache stores the RAW merged list, never the validated `kept` list** ([main.js:204-206](main.js#L204-L206)). Validation degrades a bad tender number to `אין`, which would flip that tender's upsert key from `num:` to `title:` and duplicate it on the next run. Validation is a delivery-time filter, not a cache-time one.
 
-**AI failure returns `null`, not `[]`** ([main.js:154-158](main.js#L154-L158)). `null` means "leave the cache alone and retry next run"; `[]` legitimately means "healthy page, zero open tenders" and *does* update the cache. Collapsing the two silently wipes cached tenders on a transient Gemini error.
+**AI failure returns `null`, not `[]`** ([main.js:71-73](main.js#L71-L73)). `null` means "leave the cache alone and retry next run"; `[]` legitimately means "healthy page, zero open tenders" and *does* update the cache. Collapsing the two silently wipes cached tenders on a transient Gemini error.
 
 **`stableKey` strips digits, but digit-only changes are still caught** ([lib/text.js:43-71](lib/text.js#L43-L71)). The key ignores digits so date/counter noise doesn't force false diffs; `buildKeyHashes` then md5s the digit-*inclusive* lines under each key, so a deadline edited from 15/08 to 30/08 surfaces as a `changedKey` and re-extracts. Two mechanisms, deliberately: don't "simplify" by putting digits back into `stableKey`. (This was a real v2 limitation, fixed by cache v3 — older docs describing it as an accepted trade-off are out of date.)
 
@@ -78,7 +78,7 @@ The `lib/` modules are pure and independently tested, except `ai.js` (Gemini) an
 
 **Upsert compares only against cached tenders** (`idx < keptCount` in [lib/merge.js:101](lib/merge.js#L101)). Two *newly* extracted tenders sharing a number must get `-2`/`-3` suffixes rather than overwriting each other.
 
-**Write Hebrew unicode ranges as escape sequences** (`֐-׿`), never as literal characters in a regex character class. Literal Hebrew chars in a range are an RTL-rendering trap that was already fixed once (commit 5f391aa). Hebrew in plain string literals (`'הבא'`) is fine and used throughout.
+**Write Hebrew unicode ranges as escape sequences** (`\u0590-\u05FF`), never as literal characters in a regex character class. Literal Hebrew chars in a range are an RTL-rendering trap that was already fixed once (commit 5f391aa). Hebrew in plain string literals (`'הבא'`) is fine and used throughout.
 
 **A per-site timeout frees the pool slot, it does not abort the work** ([lib/pool.js](lib/pool.js)). The orphaned `processSite` drains on its own and closes its browser in `finally`; the Chrome process can outlive the deadline by seconds, and a timed-out site's log block flushes late. That's accepted, not overlooked — true cancellation would mean threading an `AbortSignal` through the driver, the paginate loop, and both custom scrapers.
 
@@ -88,7 +88,7 @@ The `lib/` modules are pure and independently tested, except `ai.js` (Gemini) an
 
 ## Scraping: config-driven, with an escape hatch
 
-Sites are scraped one of two ways, dispatched per `MUNICIPALITIES` row in [main.js:95-98](main.js#L95-L98):
+Sites are scraped one of two ways, dispatched per `MUNICIPALITIES` row in [main.js:137-139](main.js#L137-L139):
 
 - **Generic (12 sites)** — no `script` field. [lib/paginator.js](lib/paginator.js) drives it, tuned by an optional `pagination` object on the row (`iframes`, `networkIdle`, `maxPages`, `settleMs`, `waitMs`, `nextTokens`). Adding a site is one row, no new file.
 - **Custom (2 sites)** — a `script` field pointing at `scrapers/*.js`. **`script` always wins the dispatch.** Only [scrapers/herzliya.js](scrapers/herzliya.js) and [scrapers/modiin.js](scrapers/modiin.js) remain; both diverged under `scrape-diff` and are deliberate escape hatches, not leftovers.
