@@ -14,6 +14,8 @@ node --test test/diff.test.js                     # one file
 node --test --test-name-pattern="buildChunks"     # one test by name
 npm run accuracy                                  # ground-truth harness against test/fixtures
 node scripts/scrape-diff.js <site-key>            # live, free: old scraper vs generic paginator
+node scripts/concurrency-check.js [N]             # live, free: stable-key sets at concurrency 1 vs N
+CONCURRENCY=1 node main.js                        # sequential escape hatch (pre-phase-4 behavior)
 node main.js                                      # full production run
 ```
 
@@ -22,12 +24,13 @@ node main.js                                      # full production run
 `HEADFUL=1 node main.js` opens a visible browser window — for demos and debugging.
 
 Requires `.env` (gitignored) with `GEMINI_API_KEY`, `WEBHOOK_URL`, `ELIYAHO_WEBHOOK_KEY`.
+Optional env: `CONCURRENCY` (sites in flight, default 4), `SITE_TIMEOUT_MS` (per-site ceiling, default 300000; `0` disables), `HEADFUL=1` (visible browser).
 
 ## The cost model drives the architecture
 
 Nearly every non-obvious decision in this codebase descends from one constraint: **a successful AI extraction must never be paid for twice, and token spend must scale with what changed on the page, not with page size.** Before changing pipeline logic, check your change against that.
 
-Per site, [main.js](main.js) runs:
+`main.js` runs sites through a bounded pool (`CONCURRENCY`, default 4), each site end-to-end and independent. Per site:
 
 ```
 scrape → superCleanText → buildEntries → diff vs cache.keyHashes
@@ -52,6 +55,7 @@ The `lib/` modules are pure and independently tested, except `ai.js` (Gemini) an
 | [lib/storage.js](lib/storage.js) | v3 **persistence** — per-site `loadRaw`/`saveRaw`, swappable for S3/DB |
 | [lib/sites.js](lib/sites.js) | the `MUNICIPALITIES` rows; importable without running `main.js` |
 | [lib/paginator.js](lib/paginator.js) | pure `paginate` loop (mock-driver tested) + `makePuppeteerDriver` browser adapter + `DEFAULTS` |
+| [lib/pool.js](lib/pool.js) | pure `runPool` (slot-based dispatch, concurrency cap, per-item error capture, input-order results) + `withTimeout` |
 | [lib/validate.js](lib/validate.js) | zero-token delivery-time validation: drop hallucinations, degrade bad numbers/dates to `אין` |
 | [lib/health.js](lib/health.js) | per-site health signals (`COUNT_COLLAPSE`, `ZERO_FROM_HEALTHY_PAGE`, `ALL_DEGRADED`) → ok/warn/alert |
 | [lib/ai.js](lib/ai.js) | Gemini `gemini-2.5-flash` with a constrained response schema; returns `{ tenders, usage }` |
@@ -74,7 +78,13 @@ The `lib/` modules are pure and independently tested, except `ai.js` (Gemini) an
 
 **Upsert compares only against cached tenders** (`idx < keptCount` in [lib/merge.js:101](lib/merge.js#L101)). Two *newly* extracted tenders sharing a number must get `-2`/`-3` suffixes rather than overwriting each other.
 
-**Write Hebrew unicode ranges as escape sequences** (`\u0590-\u05FF`), never as literal characters in a regex character class. Literal Hebrew chars in a range are an RTL-rendering trap that was already fixed once (commit 5f391aa). Hebrew in plain string literals (`'הבא'`) is fine and used throughout.
+**Write Hebrew unicode ranges as escape sequences** (`֐-׿`), never as literal characters in a regex character class. Literal Hebrew chars in a range are an RTL-rendering trap that was already fixed once (commit 5f391aa). Hebrew in plain string literals (`'הבא'`) is fine and used throughout.
+
+**A per-site timeout frees the pool slot, it does not abort the work** ([lib/pool.js](lib/pool.js)). The orphaned `processSite` drains on its own and closes its browser in `finally`; the Chrome process can outlive the deadline by seconds, and a timed-out site's log block flushes late. That's accepted, not overlooked — true cancellation would mean threading an `AbortSignal` through the driver, the paginate loop, and both custom scrapers.
+
+**`lib/ai.js` must stay log-free** and `processSite` must never call `console` directly. Both write into the per-site buffer that `makeSiteLog` flushes as one block; a stray `console.log` reappears interleaved between other sites' output. `test/ai.test.js` guards the `lib/ai.js` half of this.
+
+**Retry never changes what failure means.** `extractTenders` retries transient failures (429/503/network) twice with jittered backoff, then still returns `tenders: null`.
 
 ## Scraping: config-driven, with an escape hatch
 
@@ -97,6 +107,6 @@ Before deleting a custom scraper, prove equivalence with `node scripts/scrape-di
 
 `docs/superpowers/specs/` holds the authoritative rationale, one spec per phase, each with goals, non-goals, and known limitations. Read the relevant one before altering pipeline semantics; `docs/superpowers/plans/` holds the matching task-by-task implementation plans.
 
-The roadmap is five phases: **1** reliability foundation (validate/health/accuracy) ✅, **2** cache v3 ✅, **3** config-driven paginator ✅, **4** concurrency, **5** alerting on health signals.
+The roadmap is five phases: **1** reliability foundation (validate/health/accuracy) ✅, **2** cache v3 ✅, **3** config-driven paginator ✅, **4** concurrency ✅, **5** alerting on health signals.
 
 The webhook contract (`{ tenders: [...] }`, `x-webhook-key` header, full list per city) is fixed — the Lovable side is unknown and must not need to change.

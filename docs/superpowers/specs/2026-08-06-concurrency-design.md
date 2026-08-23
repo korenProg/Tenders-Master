@@ -1,7 +1,7 @@
 # Concurrency — Bounded Worker Pool — Design
 
 **Date:** 2026-08-06
-**Status:** Draft. Browser strategy confirmed 2026-08-06 (one browser per site); timeout-abort and Gemini-retry decisions still open.
+**Status:** Implemented 2026-08-20. Browser strategy confirmed 2026-08-06 (one browser per site); timeout shape (slot-freeing only, no abort plumbing) and Gemini retry (bounded, 2 retries) settled 2026-08-20. Plan: [docs/superpowers/plans/2026-08-20-concurrency.md](../plans/2026-08-20-concurrency.md)
 **Phase:** 4 of 5 on the road to ~1000 sites (follows the config-driven paginator)
 
 ## תקציר בעברית
