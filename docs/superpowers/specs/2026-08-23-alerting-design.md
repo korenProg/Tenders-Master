@@ -1,7 +1,7 @@
 # Alerting — Email on Health Signals — Design
 
 **Date:** 2026-08-23
-**Status:** Approved. Channel (Resend over HTTP), digest shape, and suppression policy settled 2026-08-23.
+**Status:** Implemented 2026-08-23. Channel (Resend over HTTP), digest shape, and suppression policy settled 2026-08-23. Plan: [docs/superpowers/plans/2026-08-23-alerting.md](../plans/2026-08-23-alerting.md)
 **Phase:** 5 of 5 on the road to ~1000 sites (follows concurrency)
 
 ## תקציר בעברית

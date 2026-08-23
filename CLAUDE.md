@@ -25,6 +25,7 @@ node main.js                                      # full production run
 
 Requires `.env` (gitignored) with `GEMINI_API_KEY`, `WEBHOOK_URL`, `ELIYAHO_WEBHOOK_KEY`.
 Optional env: `CONCURRENCY` (sites in flight, default 4), `SITE_TIMEOUT_MS` (per-site ceiling, default 300000; `0` disables), `HEADFUL=1` (visible browser).
+Alerting (optional, all three required together): `RESEND_API_KEY`, `ALERT_EMAIL_TO`, `ALERT_EMAIL_FROM`. With any of them unset, alerting is disabled and the run is unchanged.
 
 ## The cost model drives the architecture
 
@@ -58,6 +59,8 @@ The `lib/` modules are pure and independently tested, except `ai.js` (Gemini) an
 | [lib/pool.js](lib/pool.js) | pure `runPool` (slot-based dispatch, concurrency cap, per-item error capture, input-order results) + `withTimeout` |
 | [lib/validate.js](lib/validate.js) | zero-token delivery-time validation: drop hallucinations, degrade bad numbers/dates to `אין` |
 | [lib/health.js](lib/health.js) | per-site health signals (`COUNT_COLLAPSE`, `ZERO_FROM_HEALTHY_PAGE`, `ALL_DEGRADED`) → ok/warn/alert |
+| [lib/alerts.js](lib/alerts.js) | pure alerting decisions: three-state model, transition diffing, digest rendering, next state to persist |
+| [lib/alert-state.js](lib/alert-state.js) | `alerts.json` persistence — which sites we have already mailed about |
 | [lib/ai.js](lib/ai.js) | Gemini `gemini-2.5-flash` with a constrained response schema; returns `{ tenders, usage }` |
 
 `scripts/`: [scrape-diff.js](scripts/scrape-diff.js) (live migration gate, zero tokens, no webhook), [accuracy.js](scripts/accuracy.js) (ground-truth harness), [capture-fixture.js](scripts/capture-fixture.js).
@@ -86,6 +89,12 @@ The `lib/` modules are pure and independently tested, except `ai.js` (Gemini) an
 
 **Retry never changes what failure means.** `extractTenders` retries transient failures (429/503/network) twice with jittered backoff, then still returns `tenders: null`.
 
+**Alert state is saved AFTER the email is sent — the opposite of the cache's ordering** ([main.js](main.js), `sendAlerts`). The cache saves before delivery because re-delivering is cheap and re-extracting is expensive. Alerts invert it because re-sending is cheap and losing an alert is not: on a failed send the state file is left alone, so the next run retries the same transition. Both orderings are right; making them match breaks one of them.
+
+**Only a change in a site's three-value state (`ok` / `alert` / `failed`) sends mail.** A site broken for a week is silent, appearing only in the status table of a digest sent for some other site. `WARN` never mails at all.
+
+**Alerting must never fail the run.** `sendAlerts` catches everything, including its own rendering. Extraction and delivery are the product; the email is telemetry.
+
 ## Scraping: config-driven, with an escape hatch
 
 Sites are scraped one of two ways, dispatched per `MUNICIPALITIES` row in [main.js:137-139](main.js#L137-L139):
@@ -107,6 +116,6 @@ Before deleting a custom scraper, prove equivalence with `node scripts/scrape-di
 
 `docs/superpowers/specs/` holds the authoritative rationale, one spec per phase, each with goals, non-goals, and known limitations. Read the relevant one before altering pipeline semantics; `docs/superpowers/plans/` holds the matching task-by-task implementation plans.
 
-The roadmap is five phases: **1** reliability foundation (validate/health/accuracy) ✅, **2** cache v3 ✅, **3** config-driven paginator ✅, **4** concurrency ✅, **5** alerting on health signals.
+The roadmap is five phases: **1** reliability foundation (validate/health/accuracy) ✅, **2** cache v3 ✅, **3** config-driven paginator ✅, **4** concurrency ✅, **5** alerting on health signals ✅.
 
 The webhook contract (`{ tenders: [...] }`, `x-webhook-key` header, full list per city) is fixed — the Lovable side is unknown and must not need to change.
