@@ -145,7 +145,7 @@ test('backoffMs stays within the full-jitter window and honours RETRY.baseMs', a
   }
 });
 
-test.skip('lib/ai.js never touches the console (its logs belong to the caller buffer)', async () => {
+test('lib/ai.js never touches the console (its logs belong to the caller buffer)', async () => {
   const src = fs.readFileSync(path.join(__dirname, '..', 'lib', 'ai.js'), 'utf8');
   assert.ok(!/console\./.test(src), 'ai.js must stay log-free under concurrent runs');
 });

@@ -8,7 +8,7 @@ const storage = require('./lib/storage');
 const { diff, isDiffTooLarge, buildChunks } = require('./lib/diff');
 const { mergeTenders } = require('./lib/merge');
 const { MUNICIPALITIES } = require('./lib/sites');
-const { extractTenders } = require('./lib/ai');
+const { extractTenders, MODEL_NAME } = require('./lib/ai');
 const { paginate, makePuppeteerDriver } = require('./lib/paginator');
 const { validateTenders } = require('./lib/validate');
 const { assessSite, LEVELS } = require('./lib/health');
@@ -46,15 +46,37 @@ async function deliverToWebhook(tenders) {
   return response.status === 200;
 }
 
+// One buffer per site, flushed as a single contiguous block when the site
+// finishes. Under concurrency, unbuffered console.log from 4 workers shreds
+// the run log. The trade-off is explicit: a site's block appears at its
+// COMPLETION time, so blocks are no longer chronological across sites — which
+// is why the header carries the elapsed time.
+function makeSiteLog(muni, index, total) {
+  const lines = [];
+  const started = Date.now();
+  return {
+    log: (msg) => lines.push(msg),
+    flush: () => {
+      const secs = ((Date.now() - started) / 1000).toFixed(1);
+      console.log([`\n=== [${index + 1}/${total}] ${muni.publisher} — ${secs}s ===`, ...lines].join('\n'));
+    }
+  };
+}
+
 // Runs the AI extraction and folds its token usage into RUN_STATS.
 // Returns null on failure: the caller must leave the cache untouched.
-async function extractAndCount(text, opts) {
-  const { tenders, usage } = await extractTenders(text, opts);
-  if (tenders !== null) {
-    RUN_STATS.aiCalls++;
-    RUN_STATS.inputTokens += usage.inputTokens;
-    RUN_STATS.outputTokens += usage.outputTokens;
+async function extractAndCount(text, log, opts) {
+  log(`🤖 Attempting extraction with model: ${MODEL_NAME}...`);
+  const { tenders, usage, attempts, error } = await extractTenders(text, opts);
+  if (tenders === null) {
+    log(`❌ Model ${MODEL_NAME} failed after ${attempts} attempt(s) (${error}). Returning null so cache is NOT updated.`);
+    return null;
   }
+  if (attempts > 1) log(`🔁 Succeeded on attempt ${attempts} after a transient failure.`);
+  RUN_STATS.aiCalls++;
+  RUN_STATS.inputTokens += usage.inputTokens;
+  RUN_STATS.outputTokens += usage.outputTokens;
+  log(`💰 Tokens — input: ${usage.inputTokens}, output: ${usage.outputTokens}, total: ${usage.inputTokens + usage.outputTokens}`);
   return tenders;
 }
 
@@ -62,15 +84,15 @@ async function extractAndCount(text, opts) {
 // the cache with the RAW merged list — never with `kept`: degrading a tender's
 // number to "אין" would flip its upsertKey from num: to title: and duplicate
 // it on a later run.
-async function validateAndDeliver(rawTenders, cleanedText, previousTenders) {
+async function validateAndDeliver(rawTenders, cleanedText, previousTenders, log) {
   const { kept, dropped, histogram } = validateTenders(rawTenders, cleanedText);
 
   if (dropped.length > 0) {
-    console.log(`🚫 Validation dropped ${dropped.length} tender(s) not found on the page:`);
-    for (const d of dropped) console.log(`   - "${(d.tender.title || '').slice(0, 60)}" [${d.issues.join(', ')}]`);
+    log(`🚫 Validation dropped ${dropped.length} tender(s) not found on the page:`);
+    for (const d of dropped) log(`   - "${(d.tender.title || '').slice(0, 60)}" [${d.issues.join(', ')}]`);
   }
   const issueSummary = Object.entries(histogram).map(([k, v]) => `${k}=${v}`).join(' ');
-  if (issueSummary) console.log(`⚠️ Validation issues: ${issueSummary}`);
+  if (issueSummary) log(`⚠️ Validation issues: ${issueSummary}`);
 
   const health = assessSite({
     previousTenders,
@@ -79,10 +101,10 @@ async function validateAndDeliver(rawTenders, cleanedText, previousTenders) {
     issueHistogram: histogram
   });
   if (health.level === LEVELS.ALERT) {
-    console.log(`🔴 HEALTH ALERT: ${health.signals.join(', ')}`);
+    log(`🔴 HEALTH ALERT: ${health.signals.join(', ')}`);
     RUN_STATS.alerts++;
   } else if (health.level === LEVELS.WARN) {
-    console.log(`🟡 Health warning: ${health.signals.join(', ')}`);
+    log(`🟡 Health warning: ${health.signals.join(', ')}`);
     RUN_STATS.warnings++;
   }
 
@@ -95,7 +117,7 @@ async function validateAndDeliver(rawTenders, cleanedText, previousTenders) {
 // browser in `finally`, which is also what makes a timed-out orphan clean up
 // after itself once the pool has moved on.
 async function processSite(muni, index) {
-  console.log(`\n=== [${index + 1}/${MUNICIPALITIES.length}] Processing: ${muni.publisher} ===`);
+  const { log, flush } = makeSiteLog(muni, index, MUNICIPALITIES.length);
 
   let browser;
   try {
@@ -118,7 +140,7 @@ async function processSite(muni, index) {
       : await paginate(makePuppeteerDriver(page, muni.pagination || {}), muni.pagination || {});
 
     if (!scrapeResult || (typeof scrapeResult === 'string' && scrapeResult.length < 100) || (Array.isArray(scrapeResult) && scrapeResult.length === 0)) {
-      console.log(`⚠️ No content extracted for ${muni.publisher}.`);
+      log(`⚠️ No content extracted for ${muni.publisher}.`);
       return;
     }
 
@@ -138,16 +160,16 @@ async function processSite(muni, index) {
     // Case 1: nothing changed since last run
     if (siteEntry && addedKeys.length === 0 && removedKeys.length === 0 && changedKeys.length === 0) {
       if (siteEntry.pendingDelivery && siteEntry.tenders.length > 0) {
-        console.log(`📡 Content unchanged but last delivery failed — resending ${siteEntry.tenders.length} cached tenders (0 tokens)...`);
+        log(`📡 Content unchanged but last delivery failed — resending ${siteEntry.tenders.length} cached tenders (0 tokens)...`);
         // siteEntry.tenders is both the payload and the baseline: an unchanged
         // page must never look like a collapse.
-        const { ok } = await validateAndDeliver(siteEntry.tenders, cleanedCityText, siteEntry.tenders);
+        const { ok } = await validateAndDeliver(siteEntry.tenders, cleanedCityText, siteEntry.tenders, log);
         if (ok) {
           storage.saveRaw(muni.url, makeSiteEntry(siteEntry.keyHashes, siteEntry.tenders, false));
-          console.log(`✅ Webhook accepted pending delivery. Cache updated.`);
+          log(`✅ Webhook accepted pending delivery. Cache updated.`);
         }
       } else {
-        console.log(`⏭️ Green Light: Website content is IDENTICAL to last run. Skipping AI.`);
+        log(`⏭️ Green Light: Website content is IDENTICAL to last run. Skipping AI.`);
       }
       return;
     }
@@ -158,24 +180,24 @@ async function processSite(muni, index) {
     let newTenders = [];
     if (useFullPath) {
       const reason = !siteEntry ? "first run / legacy cache" : "diff too large — safety fallback";
-      console.log(`📄 Full extraction (${reason}): sending ${cleanedCityText.length} chars to AI...`);
-      newTenders = await extractAndCount(cleanedCityText);
+      log(`📄 Full extraction (${reason}): sending ${cleanedCityText.length} chars to AI...`);
+      newTenders = await extractAndCount(cleanedCityText, log);
     } else if (addedKeys.length + changedKeys.length > 0) {
       const chunks = buildChunks(entries, [...addedKeys, ...changedKeys]);
       const excerptText = chunks.join('\n---\n');
-      console.log(`✂️ Incremental: ${addedKeys.length} new / ${changedKeys.length} changed / ${removedKeys.length} removed lines → sending only ${excerptText.length} of ${cleanedCityText.length} chars to AI...`);
-      newTenders = await extractAndCount(excerptText, { excerpt: true });
+      log(`✂️ Incremental: ${addedKeys.length} new / ${changedKeys.length} changed / ${removedKeys.length} removed lines → sending only ${excerptText.length} of ${cleanedCityText.length} chars to AI...`);
+      newTenders = await extractAndCount(excerptText, log, { excerpt: true });
     } else {
-      console.log(`🗑️ Removals only (${removedKeys.length} lines gone) — no AI call needed. 0 tokens.`);
+      log(`🗑️ Removals only (${removedKeys.length} lines gone) — no AI call needed. 0 tokens.`);
     }
 
     if (newTenders === null) {
-      console.log(`⚠️ AI extraction failed. Cache NOT updated — will retry next run.`);
+      log(`⚠️ AI extraction failed. Cache NOT updated — will retry next run.`);
       return;
     }
 
     const merged = mergeTenders(useFullPath ? [] : siteEntry.tenders, newTenders, cleanedCityText, muni.publisher, muni.url);
-    console.log(`✨ Merged list: ${merged.length} tenders (${newTenders.length} newly extracted).`);
+    log(`✨ Merged list: ${merged.length} tenders (${newTenders.length} newly extracted).`);
 
     if (merged.length > 0) {
       // Save BEFORE delivery: a webhook failure must never cost a second AI call.
@@ -183,24 +205,31 @@ async function processSite(muni, index) {
       // tender's upsertKey from num: to title: and duplicate it next run.
       storage.saveRaw(muni.url, makeSiteEntry(newKeyHashes, merged, true));
 
-      console.log(`📡 Streaming structured tenders to Lovable Webhook...`);
-      const { ok, kept } = await validateAndDeliver(merged, cleanedCityText, siteEntry ? siteEntry.tenders : []);
+      log(`📡 Streaming structured tenders to Lovable Webhook...`);
+      const { ok, kept } = await validateAndDeliver(merged, cleanedCityText, siteEntry ? siteEntry.tenders : [], log);
       RUN_STATS.dropped += merged.length - kept.length;
 
       if (ok) {
         storage.saveRaw(muni.url, makeSiteEntry(newKeyHashes, merged, false));
-        console.log(`✅ Webhook Accepted! Status: 200. Delivered ${kept.length}/${merged.length} validated. Cache updated.`);
+        log(`✅ Webhook Accepted! Status: 200. Delivered ${kept.length}/${merged.length} validated. Cache updated.`);
       } else {
-        console.log(`⚠️ Webhook returned unexpected status. Extraction saved — will resend next run without AI.`);
+        log(`⚠️ Webhook returned unexpected status. Extraction saved — will resend next run without AI.`);
       }
     } else if (cleanedCityText.length > 1500) {
-      console.log(`✅ Page verified healthy with 0 active tenders. Updating Cache.`);
+      log(`✅ Page verified healthy with 0 active tenders. Updating Cache.`);
       storage.saveRaw(muni.url, makeSiteEntry(newKeyHashes, [], false));
     } else {
-      console.log(`⚠️ Warning: Page content seems too low or failed. Skipping cache to allow retry.`);
+      log(`⚠️ Warning: Page content seems too low or failed. Skipping cache to allow retry.`);
     }
+  } catch (err) {
+    // Annotate the buffer, then rethrow: the pool records the failure and the
+    // run summary lists it. Flushing in `finally` means a failing site's
+    // context is never lost.
+    log(`❌ Error: ${err.message}`);
+    throw err;
   } finally {
     if (browser) await browser.close().catch(() => {});
+    flush();
   }
 }
 
