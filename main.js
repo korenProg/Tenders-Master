@@ -13,9 +13,19 @@ const { paginate, makePuppeteerDriver } = require('./lib/paginator');
 const { validateTenders } = require('./lib/validate');
 const { assessSite, LEVELS, SIGNALS } = require('./lib/health');
 const { runPool, withTimeout } = require('./lib/pool');
+const { buildRunStates, diffAlertState, renderDigest, nextAlertState } = require('./lib/alerts');
+const alertState = require('./lib/alert-state');
 
 const WEBHOOK_URL = process.env.WEBHOOK_URL;
 const WEBHOOK_KEY = process.env.ELIYAHO_WEBHOOK_KEY;
+
+// Alerting is opt-in by configuration: with no key, the run behaves exactly as
+// it did before this feature existed. That is what keeps local runs and fresh
+// checkouts working without anyone signing up for anything.
+const RESEND_API_KEY = process.env.RESEND_API_KEY;
+const ALERT_EMAIL_TO = process.env.ALERT_EMAIL_TO;
+const ALERT_EMAIL_FROM = process.env.ALERT_EMAIL_FROM;
+const RESEND_ENDPOINT = 'https://api.resend.com/emails';
 
 // How many sites run at once. CONCURRENCY=1 reproduces the old sequential
 // behavior exactly — the escape hatch, and the A/B baseline for
@@ -251,6 +261,49 @@ async function processSite(muni, index) {
   }
 }
 
+// One digest per run, sent only when a site's state actually changed.
+//
+// ORDERING, and it is the OPPOSITE of the cache's on purpose: the cache is
+// saved BEFORE delivery because re-delivering is cheap and re-extracting is
+// expensive. Here we send FIRST and save state only on success, because
+// re-sending an alert is cheap and LOSING one is not. Saving first would let a
+// single Resend outage permanently swallow the one alert that mattered.
+//
+// Nothing in here may throw: alerting is telemetry, and a telemetry bug must
+// never take down a run that already scraped, extracted, and delivered.
+async function sendAlerts(outcomes, runMeta) {
+  if (!RESEND_API_KEY || !ALERT_EMAIL_TO || !ALERT_EMAIL_FROM) {
+    console.log('📭 Alerting disabled (RESEND_API_KEY / ALERT_EMAIL_TO / ALERT_EMAIL_FROM not all set).');
+    return;
+  }
+
+  try {
+    const previous = alertState.load();
+    const current = buildRunStates(outcomes);
+    const diff = diffAlertState(previous, current);
+    const digest = renderDigest(diff, current, runMeta);
+
+    if (!digest) {
+      console.log('📭 No alert-worthy change this run — no email sent.');
+      return;
+    }
+
+    await axios.post(RESEND_ENDPOINT, {
+      from: ALERT_EMAIL_FROM,
+      to: ALERT_EMAIL_TO,
+      subject: digest.subject,
+      text: digest.text
+    }, {
+      headers: { Authorization: `Bearer ${RESEND_API_KEY}`, 'Content-Type': 'application/json' }
+    });
+
+    alertState.save(nextAlertState(previous, current));
+    console.log(`📧 Alert sent: ${digest.subject}`);
+  } catch (e) {
+    console.log(`⚠️ Alert email failed (${e.message}). State NOT saved — the next run retries this transition.`);
+  }
+}
+
 async function run() {
   console.log("🚀 Starting Incremental Scraper Run (Line-Diff Extraction)...");
   const startTime = Date.now();
@@ -278,6 +331,23 @@ async function run() {
   console.log(`🧵 Sites: ${MUNICIPALITIES.length - failures.length}/${MUNICIPALITIES.length} completed${failures.length ? ` | ${failures.length} failed:` : ''}`);
   for (const f of failures) console.log(`   ❌ ${f.publisher}: ${f.error.message}`);
   console.log("════════════════════════════════════════");
+
+  const outcomes = MUNICIPALITIES.map((muni, i) => ({
+    url: muni.url,
+    publisher: muni.publisher,
+    ok: results[i].ok,
+    error: results[i].ok ? null : results[i].error,
+    verdict: results[i].ok ? results[i].value : null
+  }));
+
+  await sendAlerts(outcomes, {
+    minutes,
+    completed: MUNICIPALITIES.length - failures.length,
+    total: MUNICIPALITIES.length,
+    aiCalls: RUN_STATS.aiCalls,
+    inputTokens: RUN_STATS.inputTokens,
+    outputTokens: RUN_STATS.outputTokens
+  });
 }
 
 // Guarded so `require('./main.js')` (smoke checks, future tests) does not kick
