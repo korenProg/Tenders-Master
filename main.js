@@ -11,7 +11,7 @@ const { MUNICIPALITIES } = require('./lib/sites');
 const { extractTenders, MODEL_NAME } = require('./lib/ai');
 const { paginate, makePuppeteerDriver } = require('./lib/paginator');
 const { validateTenders } = require('./lib/validate');
-const { assessSite, LEVELS } = require('./lib/health');
+const { assessSite, LEVELS, SIGNALS } = require('./lib/health');
 const { runPool, withTimeout } = require('./lib/pool');
 
 const WEBHOOK_URL = process.env.WEBHOOK_URL;
@@ -38,6 +38,18 @@ const parsedTimeout = rawTimeout === undefined ? 300000 : parseInt(rawTimeout, 1
 const SITE_TIMEOUT_MS = Math.max(0, Number.isNaN(parsedTimeout) ? 300000 : parsedTimeout);
 
 const RUN_STATS = { aiCalls: 0, inputTokens: 0, outputTokens: 0, alerts: 0, warnings: 0, dropped: 0 };
+
+// Breakages the health module never sees, because they happen before or
+// instead of extraction. Kept as plain strings here rather than added to
+// lib/health.js's SIGNALS: that set is what assessSite computes, and
+// lib/alerts.js treats signal names as opaque text either way.
+const PIPELINE_SIGNALS = {
+  NO_CONTENT: 'NO_CONTENT',
+  AI_EXTRACTION_FAILED: 'AI_EXTRACTION_FAILED'
+};
+
+const VERDICT_OK = { level: LEVELS.OK, signals: [] };
+const verdictAlert = (...signals) => ({ level: LEVELS.ALERT, signals });
 
 async function deliverToWebhook(tenders) {
   const response = await axios.post(WEBHOOK_URL, { tenders }, {
@@ -121,6 +133,7 @@ async function processSite(muni, index) {
 
   let browser;
   try {
+    let verdict = VERDICT_OK;
     // HEADFUL=1 opens a visible browser window — for demos and debugging.
     browser = await puppeteer.launch({
       headless: process.env.HEADFUL ? false : "new",
@@ -141,7 +154,7 @@ async function processSite(muni, index) {
 
     if (!scrapeResult || (typeof scrapeResult === 'string' && scrapeResult.length < 100) || (Array.isArray(scrapeResult) && scrapeResult.length === 0)) {
       log(`⚠️ No content extracted for ${muni.publisher}.`);
-      return;
+      return verdictAlert(PIPELINE_SIGNALS.NO_CONTENT);
     }
 
     const pages = Array.isArray(scrapeResult) ? scrapeResult : [scrapeResult];
@@ -171,7 +184,7 @@ async function processSite(muni, index) {
       } else {
         log(`⏭️ Green Light: Website content is IDENTICAL to last run. Skipping AI.`);
       }
-      return;
+      return VERDICT_OK;
     }
 
     // Case 2: choose full vs incremental extraction
@@ -193,7 +206,7 @@ async function processSite(muni, index) {
 
     if (newTenders === null) {
       log(`⚠️ AI extraction failed. Cache NOT updated — will retry next run.`);
-      return;
+      return verdictAlert(PIPELINE_SIGNALS.AI_EXTRACTION_FAILED);
     }
 
     const merged = mergeTenders(useFullPath ? [] : siteEntry.tenders, newTenders, cleanedCityText, muni.publisher, muni.url);
@@ -206,7 +219,8 @@ async function processSite(muni, index) {
       storage.saveRaw(muni.url, makeSiteEntry(newKeyHashes, merged, true));
 
       log(`📡 Streaming structured tenders to Lovable Webhook...`);
-      const { ok, kept } = await validateAndDeliver(merged, cleanedCityText, siteEntry ? siteEntry.tenders : [], log);
+      const { ok, kept, health } = await validateAndDeliver(merged, cleanedCityText, siteEntry ? siteEntry.tenders : [], log);
+      verdict = health;
       RUN_STATS.dropped += merged.length - kept.length;
 
       if (ok) {
@@ -218,9 +232,13 @@ async function processSite(muni, index) {
     } else if (cleanedCityText.length > 1500) {
       log(`✅ Page verified healthy with 0 active tenders. Updating Cache.`);
       storage.saveRaw(muni.url, makeSiteEntry(newKeyHashes, [], false));
+      verdict = verdictAlert(SIGNALS.ZERO_FROM_HEALTHY_PAGE);
     } else {
       log(`⚠️ Warning: Page content seems too low or failed. Skipping cache to allow retry.`);
+      verdict = verdictAlert(PIPELINE_SIGNALS.NO_CONTENT);
     }
+
+    return verdict;
   } catch (err) {
     // Annotate the buffer, then rethrow: the pool records the failure and the
     // run summary lists it. Flushing in `finally` means a failing site's
