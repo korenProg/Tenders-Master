@@ -45,7 +45,7 @@ scrape → superCleanText → buildEntries → diff vs cache.keyHashes
 
 Note the ordering at the tail: the cache is saved with the **raw merged** list, then validation and health assessment run, then delivery. See the invariants below — both halves of that ordering are load-bearing.
 
-The `lib/` modules are pure and independently tested, except `ai.js` (Gemini) and `storage.js` (disk); `main.js` is orchestration only (browser, network, webhook). Keep it that way — logic added to `main.js` is logic that can't be tested without a live run.
+The `lib/` modules are pure and independently tested, except `ai.js` (Gemini), `storage.js` (disk), and `alert-state.js` (disk); `main.js` is orchestration only (browser, network, webhook). Keep it that way — logic added to `main.js` is logic that can't be tested without a live run.
 
 | Module | Responsibility |
 |---|---|
