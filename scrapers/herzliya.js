@@ -122,8 +122,20 @@ async function scrape(page) {
       break;
     }
 
+    // Reaching this on page > 1 means ONE thing, and it is not "pagination
+    // ended": isReady() refuses to return while the text still matches the
+    // previous page, so pollForText cannot return early here — it can only
+    // have burned the full POLL_CEILING_MS. In other words the frame never
+    // re-rendered within 100s, and we are giving up mid-list.
+    //
+    // A genuine end of pagination is reported by the clickSuccess check
+    // further down ("Could not find any valid pagination target"). Keeping
+    // these two apart is what tells a human whether a later COUNT_COLLAPSE
+    // alert on Herzliya is a real change on the site or this scraper losing
+    // pages under load — the exact ambiguity that cost a third of the site
+    // once already.
     if (currentPage > 1 && combinedText.trim() === previousPageText.trim()) {
-      console.log(`⛔ Text is identical to previous page. Stopping.`);
+      console.log(`⚠️ SUSPECT: frame never re-rendered within ${POLL_CEILING_MS / 1000}s at page ${currentPage}. Giving up with ${allPagesText.length} page(s) — expect fewer tenders than usual.`);
       break;
     }
 
