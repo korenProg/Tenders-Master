@@ -199,3 +199,25 @@ test('nextAlertState keeps a failed site error for the next digest', () => {
   const next = nextAlertState({}, buildRunStates([failed('u1', 'boom')]), '2026-08-23T00:00:00.000Z');
   assert.strictEqual(next.u1.error, 'boom');
 });
+
+test('a run where one site breaks and another recovers at once reports both', () => {
+  const previous = {
+    u1: { state: 'ok', signals: [], since: '2026-08-20T00:00:00.000Z' },
+    u2: { state: 'alert', signals: ['COUNT_COLLAPSE'], since: '2026-08-20T00:00:00.000Z' }
+  };
+  const current = buildRunStates([alert('u1'), ok('u2')]);
+  current[0].publisher = 'עיריית חולון';
+  current[1].publisher = 'עיריית אשדוד';
+
+  const d = diffAlertState(previous, current);
+  assert.strictEqual(d.changed, true);
+  assert.strictEqual(d.newlyBroken.length, 1);
+  assert.strictEqual(d.recovered.length, 1);
+
+  const digest = renderDigest(d, current, RUN_META);
+  assert.match(digest.subject, /עיריית חולון/);
+  assert.match(digest.subject, /🔴/);
+  assert.doesNotMatch(digest.subject, /✅/);
+  assert.match(digest.text, /BROKEN/);
+  assert.match(digest.text, /RECOVERED/);
+});

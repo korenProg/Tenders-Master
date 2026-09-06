@@ -280,21 +280,26 @@ async function sendAlerts(outcomes, runMeta) {
   try {
     const previous = alertState.load();
     const current = buildRunStates(outcomes);
-    const diff = diffAlertState(previous, current);
-    const digest = renderDigest(diff, current, runMeta);
+    const alertDiff = diffAlertState(previous, current);
+    const digest = renderDigest(alertDiff, current, runMeta);
 
     if (!digest) {
       console.log('📭 No alert-worthy change this run — no email sent.');
       return;
     }
 
+    // This is the only network call in the pipeline not already bounded by
+    // the pool's per-site timeout: it runs after the pool has finished, so a
+    // stalled TCP session here (not a clean 4xx/5xx — axios rejects those
+    // promptly on its own) has nothing else to make the process exit.
     await axios.post(RESEND_ENDPOINT, {
       from: ALERT_EMAIL_FROM,
       to: ALERT_EMAIL_TO,
       subject: digest.subject,
       text: digest.text
     }, {
-      headers: { Authorization: `Bearer ${RESEND_API_KEY}`, 'Content-Type': 'application/json' }
+      headers: { Authorization: `Bearer ${RESEND_API_KEY}`, 'Content-Type': 'application/json' },
+      timeout: 15000
     });
 
     alertState.save(nextAlertState(previous, current));
