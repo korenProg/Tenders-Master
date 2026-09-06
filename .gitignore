@@ -3,4 +3,5 @@ node_modules/
 .DS_Store
 tenders_cache.json
 cache/
+alerts.json
 .superpowers/
